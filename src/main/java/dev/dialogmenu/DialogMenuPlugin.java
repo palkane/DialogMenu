@@ -18,6 +18,7 @@ import java.io.*;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
 import net.kyori.adventure.text.Component;
 import org.bukkit.*;
 import org.bukkit.command.*;
@@ -31,6 +32,10 @@ import java.util.function.Consumer;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.plugin.ServicePriority;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.boss.BarColor;
+import org.bukkit.boss.BarStyle;
+import org.bukkit.boss.BossBar;
+import org.bukkit.scheduler.BukkitTask;
 import static dev.dialogmenu.MenuModel.*;
 import static dev.dialogmenu.DialogMenuClosedEvent.Reason;
 
@@ -46,6 +51,12 @@ public final class DialogMenuPlugin extends JavaPlugin implements Listener, TabE
     private volatile ReloadEngine.Snapshot loaded;
     private final ResourcePublication<ReloadEngine.Result> publication = new ResourcePublication<>();
     private boolean reloadRequested;
+    private ReloadSession activeReload;
+    private final ScheduledExecutorService reloadProgressLogger = Executors.newSingleThreadScheduledExecutor(task -> {
+        Thread thread = new Thread(task, "DialogMenu-reload-progress");
+        thread.setDaemon(true);
+        return thread;
+    });
     private final YamlConfiguration preferences = new YamlConfiguration();
     private final ActionTokens tokens = new ActionTokens();
     private final ClickGestures gestures = new ClickGestures(() -> System.nanoTime() / 1_000_000,
@@ -57,6 +68,18 @@ public final class DialogMenuPlugin extends JavaPlugin implements Listener, TabE
     private record View(LayoutStore.Document document, int width, List<String> history, UUID token) {}
     private int width, maxPixels;
     private final DialogMenuApi api = new DialogMenuApi(this);
+
+    private static final class ReloadSession {
+        final CommandSender sender;
+        final long startedAt = System.nanoTime();
+        final AtomicReference<ReloadEngine.Progress> progress =
+            new AtomicReference<>(new ReloadEngine.Progress(0, "等待准备"));
+        final AtomicBoolean finished = new AtomicBoolean();
+        BossBar bossBar;
+        BukkitTask bossBarTask;
+        ScheduledFuture<?> consoleTask;
+        ReloadSession(CommandSender sender) { this.sender = sender; }
+    }
 
     public DialogMenuApi getMenuApi() { return api; }
     boolean hasLayout(String id) { return store != null && store.get(id) != null; }
@@ -167,6 +190,7 @@ public final class DialogMenuPlugin extends JavaPlugin implements Listener, TabE
             getConfig().addDefault("text-scales", List.of(1, 1.5, 2));
             getConfig().addDefault("default-text-scale", 1);
             getConfig().addDefault("craftengine-auto-reload", true);
+            getConfig().addDefault("reload-progress-bossbar", true);
             getConfig().options().copyDefaults(true);
             saveConfig();
             try (var jar = new java.util.jar.JarFile(getFile())) {
@@ -193,6 +217,8 @@ public final class DialogMenuPlugin extends JavaPlugin implements Listener, TabE
         }
     }
     @Override public void onDisable() {
+        if (activeReload != null) finishReloadDisplay(activeReload);
+        reloadProgressLogger.shutdownNow();
         Bukkit.getServicesManager().unregisterAll(this);
         if (editor != null) editor.close();
         if (craftEngineBridge != null) craftEngineBridge.close();
@@ -293,26 +319,104 @@ public final class DialogMenuPlugin extends JavaPlugin implements Listener, TabE
     private void requestReload(CommandSender sender, ReloadEngine.Request request) {
         if (reloadRequested) { sender.sendMessage("Dialog正在重载。"); return; }
         reloadRequested = true;
-        reloadEngine.prepare(request).whenComplete((result, error) -> {
+        ReloadSession session = new ReloadSession(sender);
+        activeReload = session;
+        startReloadDisplay(session, request);
+        reloadEngine.prepare(request, session.progress::set).whenComplete((result, error) -> {
             if (!isEnabled()) return;
             Bukkit.getScheduler().runTask(this, () -> {
                 reloadRequested = false;
-                if (error != null) { failure(sender, unwrap(error)); return; }
-                boolean changed = acceptResources(result);
-                if (externalPublication() && publication.pending() != null) {
-                    sender.sendMessage(Component.text("资源已准备，等待最终包发布确认。版本："
-                        + publication.pending().generation(), net.kyori.adventure.text.format.TextColor.color(0xBECECF)));
+                if (error != null) {
+                    finishReloadDisplay(session);
+                    failure(sender, unwrap(error));
+                    sender.sendMessage("Dialog重载失败；旧快照保留。耗时 " + elapsedMillis(session) + " ms。");
                     return;
                 }
-                sender.sendMessage(!result.changed() ? "Dialog未变化，复用现有资源。"
-                    : request.menu() != null ? "Dialog菜单 " + request.menu() + " 已重载，材质包未修改。"
-                    : result.resourcesChanged() ? "Dialog资源已异步重载。"
-                    : "Dialog布局已重载，材质包未修改。");
-                if (changed && result.resourcesChanged() && loaded.settings().autoCraftEngine()
-                    && Bukkit.getPluginManager().isPluginEnabled("CraftEngine"))
-                    Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "ce reload all");
+                try {
+                    boolean changed = acceptResources(result);
+                    long elapsed = elapsedMillis(session);
+                    int menuCount = reloadedMenuCount(request, result);
+                    if (externalPublication() && publication.pending() != null) {
+                        completeProgress(session);
+                        sender.sendMessage("Dialog资源已准备：共 " + menuCount + " 个菜单，耗时 "
+                            + elapsed + " ms；等待最终资源包发布确认。版本："
+                            + publication.pending().generation());
+                        return;
+                    }
+                    if (changed && result.resourcesChanged() && loaded.settings().autoCraftEngine()
+                        && Bukkit.getPluginManager().isPluginEnabled("CraftEngine"))
+                        Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "ce reload all");
+                    completeProgress(session);
+                    sender.sendMessage("Dialog重载完成：共 " + menuCount + " 个菜单，耗时 "
+                        + elapsed + " ms。");
+                } catch (Exception publishError) {
+                    finishReloadDisplay(session);
+                    failure(sender, publishError);
+                    sender.sendMessage("Dialog重载发布失败；旧快照保留。耗时 "
+                        + elapsedMillis(session) + " ms。");
+                }
             });
         });
+    }
+    private void startReloadDisplay(ReloadSession session, ReloadEngine.Request request) {
+        if (session.sender instanceof Player player && reloadProgressBossBarEnabled(request)) {
+            session.bossBar = Bukkit.createBossBar("DialogMenu 重载 0% · 准备中", BarColor.BLUE, BarStyle.SOLID);
+            session.bossBar.addPlayer(player);
+            session.bossBar.setVisible(true);
+            session.bossBarTask = Bukkit.getScheduler().runTaskTimer(this,
+                () -> updateReloadBossBar(session), 0, 20);
+        }
+        session.consoleTask = reloadProgressLogger.scheduleAtFixedRate(() -> {
+            if (session.finished.get()) return;
+            ReloadEngine.Progress progress = session.progress.get();
+            getLogger().info("DialogMenu reload progress=" + progress.percent() + "% stage="
+                + progress.stage() + " elapsed=" + elapsedMillis(session) + "ms");
+        }, 5, 5, TimeUnit.SECONDS);
+    }
+    private boolean reloadProgressBossBarEnabled(ReloadEngine.Request request) {
+        if (request.menu() == null && (loaded == null || request.mode() != ReloadEngine.Mode.RESOURCE)) {
+            YamlConfiguration config = YamlConfiguration.loadConfiguration(new File(getDataFolder(), "config.yml"));
+            return config.getBoolean("reload-progress-bossbar", true);
+        }
+        ReloadEngine.Snapshot snapshot = loaded;
+        return snapshot == null
+            ? getConfig().getBoolean("reload-progress-bossbar", true)
+            : snapshot.settings().reloadProgressBossBar();
+    }
+    private void updateReloadBossBar(ReloadSession session) {
+        if (session.bossBar == null || session.finished.get()) return;
+        if (!(session.sender instanceof Player player) || !player.isOnline()) {
+            session.bossBar.removeAll();
+            return;
+        }
+        ReloadEngine.Progress progress = session.progress.get();
+        session.bossBar.setProgress(Math.max(0, Math.min(1, progress.percent() / 100.0)));
+        session.bossBar.setTitle("DialogMenu 重载 " + progress.percent() + "% · " + progress.stage());
+    }
+    private void completeProgress(ReloadSession session) {
+        session.progress.set(new ReloadEngine.Progress(100, "完成"));
+        finishReloadDisplay(session);
+    }
+    private void finishReloadDisplay(ReloadSession session) {
+        if (!session.finished.compareAndSet(false, true)) return;
+        if (session.consoleTask != null) session.consoleTask.cancel(false);
+        if (session.bossBarTask != null) session.bossBarTask.cancel();
+        if (session.bossBar != null) {
+            session.bossBar.removeAll();
+            session.bossBar.setVisible(false);
+        }
+        if (activeReload == session) activeReload = null;
+    }
+    private static long elapsedMillis(ReloadSession session) {
+        return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - session.startedAt);
+    }
+    private static int reloadedMenuCount(ReloadEngine.Request request, ReloadEngine.Result result) {
+        if (request.menu() == null) return result.snapshot().documents().size();
+        if (!result.menus().isEmpty()) return result.menus().size();
+        String target = LayoutStore.id(request.menu());
+        return (int) result.snapshot().documents().values().stream()
+            .filter(document -> document.menu().id().equals(target) || LayoutStore.source(document).equals(target))
+            .count();
     }
     private static Exception unwrap(Throwable error) {
         while (error instanceof CompletionException || error instanceof ExecutionException) error = error.getCause();
@@ -521,6 +625,8 @@ public final class DialogMenuPlugin extends JavaPlugin implements Listener, TabE
         if (Bukkit.isPrimaryThread()) execute.run(); else Bukkit.getScheduler().runTask(this, execute);
     }
     @EventHandler public void quit(PlayerQuitEvent event) {
+        if (activeReload != null && activeReload.bossBar != null)
+            activeReload.bossBar.removePlayer(event.getPlayer());
         close(event.getPlayer(), Reason.PLAYER_QUIT);
     }
     @EventHandler public void ownerDisabled(PluginDisableEvent event) {

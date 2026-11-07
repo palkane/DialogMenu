@@ -5,6 +5,7 @@ import java.nio.file.*;
 import java.nio.file.attribute.FileTime;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.function.Consumer;
 import java.util.zip.*;
 import org.bukkit.configuration.file.YamlConfiguration;
 import static dev.dialogmenu.MenuModel.*;
@@ -12,6 +13,16 @@ import static dev.dialogmenu.MenuModel.*;
 /** 文件解析和资源包准备不接触运行中的 Bukkit 或玩家状态。 */
 final class ReloadEngine implements AutoCloseable {
     enum Mode { YAML, RESOURCE, ALL }
+    record Progress(int percent, String stage) {}
+    private static final class ProgressReporter {
+        private final Consumer<Progress> sink;
+        private int percent;
+        ProgressReporter(Consumer<Progress> sink) { this.sink = sink; }
+        void update(int next, String stage) {
+            percent = Math.max(percent, Math.max(0, Math.min(99, next)));
+            sink.accept(new Progress(percent, stage));
+        }
+    }
     record Request(Mode mode, String menu) {
         static Request command(String[] args) {
             if (args.length == 1) return new Request(Mode.YAML, null);
@@ -24,7 +35,7 @@ final class ReloadEngine implements AutoCloseable {
     record Settings(int width, int maxPixels, String defaultLayout, boolean escape,
                     List<Double> textScales, double defaultTextScale, boolean autoCraftEngine,
                     Path resourceRoot, int resourceBuildCpuPercent, List<String> craftEngineDefinitions,
-                    List<Integer> textColors) {}
+                    List<Integer> textColors, boolean reloadProgressBossBar) {}
     record Stamp(long size, FileTime modified, String digest) {}
     record Snapshot(Map<String, LayoutStore.Document> documents, VanillaAssets assets, MenuRenderer renderer,
                     FontPack fonts, Settings settings, Path pack, Map<Path, Stamp> inputs,
@@ -61,16 +72,22 @@ final class ReloadEngine implements AutoCloseable {
         return prepare(new Request(mode, null));
     }
     CompletableFuture<Result> prepare(Request request) {
+        return prepare(request, ignored -> {});
+    }
+    CompletableFuture<Result> prepare(Request request, Consumer<Progress> progress) {
         return CompletableFuture.supplyAsync(() -> {
+            ProgressReporter reporter = new ProgressReporter(progress);
             try {
-                return request.menu() != null ? layout(request.menu())
-                    : request.mode() == Mode.YAML ? layouts() : build(request.mode());
+                reporter.update(1, "开始重载");
+                return request.menu() != null ? layout(request.menu(), reporter)
+                    : request.mode() == Mode.YAML ? layouts(reporter) : build(request.mode(), reporter);
             }
             catch (Exception error) { throw new CompletionException(error); }
         }, worker);
     }
-    private Result layout(String id) throws Exception {
+    private Result layout(String id, ProgressReporter progress) throws Exception {
         long start = System.nanoTime();
+        progress.update(5, "检查菜单");
         if (latest == null) throw new IllegalStateException("尚无资源，请执行 /dialogmenu reload all");
         LayoutStore store = new LayoutStore(data.resolve("layouts"));
         var existing = latest.documents().get(id);
@@ -78,7 +95,11 @@ final class ReloadEngine implements AutoCloseable {
         Path file = store.file(name);
         Map<Path, Stamp> input = stamps(Set.of(file));
         if (!input.containsKey(file)) throw new IllegalArgumentException("布局文件不存在：" + name);
-        if (input.get(file).equals(latest.inputs().get(file))) return new Result(latest, false, false);
+        if (input.get(file).equals(latest.inputs().get(file))) {
+            progress.update(95, "菜单未变化，复用已加载快照");
+            return new Result(latest, false, false);
+        }
+        progress.update(30, "解析菜单");
         var replacements = store.load(name);
         Map<String, LayoutStore.Document> documents = new LinkedHashMap<>(latest.documents());
         Set<String> affected = new HashSet<>();
@@ -94,8 +115,10 @@ final class ReloadEngine implements AutoCloseable {
         if (!documents.containsKey(latest.settings().defaultLayout()))
             throw new IllegalArgumentException("default-layout不存在；旧布局保留");
         LayoutStore.validateLinks(documents);
+        progress.update(65, "校验菜单与资源引用");
         try {
-            validate(MenuTemplate.catalog(replacements.values()), latest.renderer(), latest.fonts(), latest.settings());
+            validate(MenuTemplate.catalog(replacements.values()), latest.renderer(), latest.fonts(),
+                latest.settings(), progress, 65, 90);
         } catch (IllegalArgumentException error) {
             throw new IllegalArgumentException("布局不能复用现有资源：" + error.getMessage()
                 + "；旧布局保留，需要新字形时执行 /dialogmenu reload all", error);
@@ -107,24 +130,33 @@ final class ReloadEngine implements AutoCloseable {
             TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start), Thread.currentThread().getName(), ++generation);
         cache.retain(next, next.pack());
         latest = next;
+        progress.update(98, "菜单已准备，等待发布");
         return new Result(next, true, false, Set.copyOf(affected));
     }
-    private Result layouts() throws Exception {
+    private Result layouts(ProgressReporter progress) throws Exception {
         long start = System.nanoTime();
+        progress.update(5, "扫描配置与菜单文件");
         if (latest == null) throw new IllegalStateException("尚无资源，请执行 /dialogmenu reload all");
         Map<Path, Stamp> current = yamlInputs();
-        if (latest.inputs().equals(current)) return new Result(latest, false, false);
+        if (latest.inputs().equals(current)) {
+            progress.update(95, "菜单未变化，复用已加载快照");
+            return new Result(latest, false, false);
+        }
+        progress.update(20, "读取重载设置");
         Settings settings = settings();
         if (!settings.resourceRoot().equals(latest.settings().resourceRoot())
             || !settings.craftEngineDefinitions().equals(latest.settings().craftEngineDefinitions())
             || !latest.settings().textScales().containsAll(settings.textScales())
             || !latest.settings().textColors().containsAll(settings.textColors()))
             throw new IllegalArgumentException("资源目录、CE定义文件、字体倍率或颜色范围已变化，请执行 /dialogmenu reload all；旧布局保留");
+        progress.update(35, "解析全部菜单");
         var documents = new LayoutStore(data.resolve("layouts")).load();
         if (!documents.containsKey(settings.defaultLayout()))
             throw new IllegalArgumentException("default-layout不存在");
+        progress.update(60, "校验菜单与已准备资源");
         try {
-            validate(MenuTemplate.catalog(documents.values()), latest.renderer(), latest.fonts(), settings);
+            validate(MenuTemplate.catalog(documents.values()), latest.renderer(), latest.fonts(),
+                settings, progress, 60, 90);
         } catch (IllegalArgumentException error) {
             throw new IllegalArgumentException("布局不能复用现有资源：" + error.getMessage()
                 + "；旧布局保留，需要新字形时执行 /dialogmenu reload all", error);
@@ -134,6 +166,7 @@ final class ReloadEngine implements AutoCloseable {
             TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start), Thread.currentThread().getName(), ++generation);
         cache.retain(next, next.pack());
         latest = next;
+        progress.update(98, "菜单已准备，等待发布");
         return new Result(next, true, false);
     }
     private Settings settings() throws Exception {
@@ -163,33 +196,44 @@ final class ReloadEngine implements AutoCloseable {
             yaml.getBoolean("craftengine-auto-reload", true),
             data.resolve(yaml.getString("craftengine-resources", "../CraftEngine/resources")).normalize(),
             LayoutStore.integer(yaml, "resource-build-cpu-percent", 80, 1, 100),
-            List.copyOf(LayoutStore.strings(yaml.get("craftengine-definitions"))), List.copyOf(colors));
+            List.copyOf(LayoutStore.strings(yaml.get("craftengine-definitions"))), List.copyOf(colors),
+            yaml.getBoolean("reload-progress-bossbar", true));
     }
-    private Result build(Mode mode) throws Exception {
+    private Result build(Mode mode, ProgressReporter progress) throws Exception {
         long start = System.nanoTime();
+        progress.update(5, "检查资源缓存");
         cache.prune();
         // 仅资源重载不读取磁盘上的待应用布局或配置。
         boolean all = mode == Mode.ALL || latest == null;
+        progress.update(10, "读取重载配置");
         Map<Path, Stamp> yamlInputs = all ? yamlInputs() : latest.inputs();
         Settings settings = all ? settings() : latest.settings();
+        progress.update(15, "准备菜单和资源清单");
         try (var budget = BuildBudget.open(settings.resourceBuildCpuPercent())) {
-            return build(all, yamlInputs, settings, start);
+            return build(all, yamlInputs, settings, start, progress);
         }
     }
-    private Result build(boolean all, Map<Path, Stamp> yamlInputs, Settings settings, long start) throws Exception {
+    private Result build(boolean all, Map<Path, Stamp> yamlInputs, Settings settings, long start,
+                         ProgressReporter progress) throws Exception {
         if (latest != null && builtInputs.equals(yamlInputs)
-            && latest.resourceInputs().equals(resourceInputs(latest.assets(), settings)))
+            && latest.resourceInputs().equals(resourceInputs(latest.assets(), settings))) {
+            progress.update(95, "资源未变化，复用已准备快照");
             return new Result(latest, false, false);
+        }
         var documents = all ? new LayoutStore(data.resolve("layouts")).load() : latest.documents();
         if (!documents.containsKey(settings.defaultLayout())) throw new IllegalArgumentException("default-layout不存在");
+        progress.update(20, "扫描图像与CraftEngine资源");
         var assets = new VanillaAssets(data.resolve("images"), settings.resourceRoot(), settings.craftEngineDefinitions());
         Map<Path, Stamp> initialResources = resourceInputs(assets, settings);
         var renderer = new MenuRenderer(assets);
         List<LayoutStore.Document> catalog = MenuTemplate.catalog(documents.values());
         var widths = new TreeSet<>(List.of(300, 360, 420, settings.width()));
+        progress.update(24, "生成字体与图片资源");
         var fonts = FontPack.create(catalog, renderer, preview, widths, settings.maxPixels(),
-            MenuTemplate.characters(documents.values()), settings.textScales(), CanvasScale.OPTIONS, settings.textColors());
-        validate(catalog, renderer, fonts, settings);
+            MenuTemplate.characters(documents.values()), settings.textScales(), CanvasScale.OPTIONS,
+            settings.textColors(), step -> progress.update(24 + step * 48 / 85,
+                step < 55 ? "准备菜单图文" : "生成字形图集"));
+        validate(catalog, renderer, fonts, settings, progress, 73, 80);
         assets.verifyInputs();
         if (all && !yamlInputs.equals(yamlInputs())) throw new IOException("构建期间布局或配置发生变化，请重试");
         var afterResources = resourceInputs(assets, settings);
@@ -201,14 +245,22 @@ final class ReloadEngine implements AutoCloseable {
         Path exported = Files.createTempDirectory(packDirectory, "staging-");
         Path zip = packDirectory.resolve("dialog-" + UUID.randomUUID() + ".zip");
         try {
-            fonts.write(exported);
-            try (var output = new ZipOutputStream(Files.newOutputStream(zip));
-                 var files = Files.walk(exported)) {
-                for (Path path : files.filter(Files::isRegularFile).sorted().toList()) {
+            progress.update(81, "写入资源包文件");
+            fonts.write(exported, step -> progress.update(81 + step * 8 / 100, "写入字体与图片"));
+            List<Path> files;
+            try (var paths = Files.walk(exported)) {
+                files = paths.filter(Files::isRegularFile).sorted().toList();
+            }
+            progress.update(90, "压缩资源包");
+            try (var output = new ZipOutputStream(Files.newOutputStream(zip))) {
+                int totalFiles = Math.max(1, files.size()), completedFiles = 0;
+                for (Path path : files) {
                     BuildBudget.checkpoint();
                     output.putNextEntry(new ZipEntry(exported.relativize(path).toString().replace('\\', '/')));
                     Files.copy(path, output);
                     output.closeEntry();
+                    completedFiles++;
+                    progress.update(90 + completedFiles * 8 / totalFiles, "压缩资源包");
                 }
             }
         } catch (Exception error) {
@@ -233,11 +285,13 @@ final class ReloadEngine implements AutoCloseable {
         cache.retain(next, zip);
         builtInputs = yamlInputs;
         latest = next;
+        progress.update(99, "资源快照构建完成");
         return new Result(next, true);
     }
     private void validate(List<LayoutStore.Document> catalog, MenuRenderer renderer, FontPack fonts,
-                          Settings settings) throws Exception {
+                          Settings settings, ProgressReporter progress, int start, int end) throws Exception {
         var widths = new TreeSet<>(List.of(300, 360, 420, settings.width()));
+        int total = Math.max(1, catalog.size() * widths.size()), completed = 0;
         // 可选倍率在玩家选择时校验，不要求每个布局加载时适配所有倍率。
         for (var doc : catalog) for (int size : widths) {
             BuildBudget.checkpoint();
@@ -251,6 +305,8 @@ final class ReloadEngine implements AutoCloseable {
             var frame = renderer.draw(doc.menu(), active, size, settings.maxPixels());
             new SpriteCanvas().encode(doc.menu(), frame, active, fonts, region -> null);
             fonts.validateDynamic(doc, active, size, MenuTemplate.characters(catalog));
+            completed++;
+            progress.update(start + completed * (end - start) / total, "校验菜单与资源");
         }
     }
     private Map<Path, Stamp> yamlInputs() throws IOException {

@@ -39,12 +39,19 @@ final class RgbaOffsets {
                 throw new IllegalArgumentException("此菜单不支持该文字样式，请移除斜体、下划线、删除线或混淆格式。");
     }
 
-    void add(int color) {
+    int add(int color) {
         int rgb = color & 0xFFFFFF;
         if (!palette.containsKey(rgb)) {
-            if (palette.size() == 256) throw new IllegalArgumentException("Shader文字颜色超过256种");
+            if (palette.size() == 256) throw new IllegalArgumentException("Shader文字和图片共享颜色超过256种");
             palette.put(rgb, palette.size());
         }
+        return palette.get(rgb);
+    }
+
+    int index(int color) {
+        Integer index = palette.get(color & 0xFFFFFF);
+        if (index == null) throw new IllegalArgumentException("图片颜色未准备，请执行 /dialogmenu reload all");
+        return index;
     }
 
     Component encode(Component text, int fallback, int top) {

@@ -11,24 +11,24 @@ import net.kyori.adventure.text.format.TextDecoration;
 
 /** 原生命中几何保留在目标 Y；alpha=1 的字格由原版 text.fsh 丢弃。 */
 final class RgbaHits {
-    private record Location(int top, int size) {}
+    private record Location(int top, TextStyle style) {}
     private record Cell(int height, int width) {
         String texture() { return "generated/hit_" + height + "_" + width + ".png"; }
     }
     private record Hit(Location location, Cell cell) {}
     private final Set<Location> locations = new LinkedHashSet<>();
-    private final Map<Integer, Map<Integer, Cell>> bySize = new HashMap<>();
+    private final Map<TextStyle, Map<Integer, Cell>> byFont = new HashMap<>();
     private final Map<String, Cell> cells = new LinkedHashMap<>();
     private final Map<Hit, Integer> glyphs = new LinkedHashMap<>();
 
-    void prepare(int top, int size) {
-        if (top + size < 7)
+    void prepare(int top, TextStyle style) {
+        if (top + style.height() < 7)
             throw new IllegalArgumentException("文字命中超出原生基线范围，请将该小字号元素下移至第7像素后");
-        locations.add(new Location(top, size));
+        locations.add(new Location(top, style));
     }
 
-    void source(int size, List<FontPack.TextAtlas> atlases) {
-        Map<Integer, Cell> characters = bySize.computeIfAbsent(size, key -> new HashMap<>());
+    void source(TextStyle style, List<FontPack.TextAtlas> atlases) {
+        Map<Integer, Cell> characters = byFont.computeIfAbsent(style, key -> new HashMap<>());
         for (var atlas : atlases) {
             int columns = atlas.chars().getFirst().codePointCount(0, atlas.chars().getFirst().length());
             int width = atlas.image().getWidth() / columns, height = atlas.sourceHeight();
@@ -53,25 +53,28 @@ final class RgbaHits {
         for (Location location : locations) {
             BuildBudget.checkpoint();
             for (Cell cell : cells.values())
-                if (bySize.get(location.size()).containsValue(cell))
+                if (byFont.get(location.style()).containsValue(cell))
                     glyphs.computeIfAbsent(new Hit(location, cell), key -> 0xF0000 + glyphs.size());
         }
     }
 
     Component text(int top, int size, Component value, FontPack fonts) {
-        Location location = new Location(top, size);
+        return text(top, new TextStyle(size, 1, 1), value, fonts);
+    }
+    Component text(int top, TextStyle style, Component value, FontPack fonts) {
+        Location location = new Location(top, style);
         if (!locations.contains(location)) throw new IllegalArgumentException("RGBA hit position changed; rebuild resources");
         var builder = Component.text();
         for (var glyph : MenuText.glyphs(value)) {
-            int advance = fonts.glyphWidth(glyph, size);
+            int advance = fonts.glyphWidth(glyph, style);
             if (glyph.code() == ' ') {
                 builder.append(Component.text(SpriteCanvas.move(advance)).font(SpriteCanvas.SPACE));
                 continue;
             }
-            Cell cell = bySize.get(size).get(glyph.code());
+            Cell cell = byFont.get(style).get(glyph.code());
             if (cell == null) throw new IllegalArgumentException("RGBA hit character not prepared");
             builder.append(Component.text(Character.toString(glyphs.get(new Hit(location, cell)))));
-            int proxyAdvance = (int) (.5 + cell.width() * (size / (float) cell.height())) + 1;
+            int proxyAdvance = (int) (.5 + cell.width() * (style.height() / (float) cell.height())) + 1;
             if (advance != proxyAdvance)
                 builder.append(Component.text(SpriteCanvas.move(advance - proxyAdvance)).font(SpriteCanvas.SPACE));
         }
@@ -94,7 +97,7 @@ final class RgbaHits {
             BuildBudget.checkpoint();
             Location location = entry.getKey().location();
             Cell cell = entry.getKey().cell();
-            providers.add(FontPack.bitmap(cell.texture(), location.size(), 7 - location.top(),
+            providers.add(FontPack.bitmap(cell.texture(), location.style().height(), 7 - location.top(),
                 List.of(Character.toString(entry.getValue()))));
         }
         Files.writeString(base.resolve("font/text_hit_all.json"),

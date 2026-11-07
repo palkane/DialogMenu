@@ -1,8 +1,12 @@
 package dev.dialogmenu;
 
+import com.google.gson.JsonParser;
+import java.awt.image.BufferedImage;
+import javax.imageio.ImageIO;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.ExecutionException;
+import net.kyori.adventure.text.event.ClickEvent;
 import org.bukkit.configuration.file.YamlConfiguration;
 import static dev.dialogmenu.MenuModel.*;
 
@@ -55,6 +59,7 @@ public final class ResourceRegressionTests {
         examples(root);
         publication();
         preview(root);
+        tintAndTextStretch(root);
         Path input = root.resolve("input.bin"); Files.writeString(input, "A");
         var consumed = new SourceFiles(); consumed.read(input); consumed.verify();
         Files.writeString(input, "B");
@@ -126,8 +131,11 @@ public final class ResourceRegressionTests {
         rejects(() -> palette.add(0x123456), "palette overflow accepted");
     }
     private static void examples(Path root) throws Exception {
-        Path data = root.resolve("examples"); Files.createDirectories(data.resolve("layouts"));
-        for (String resource : List.of("config.yml", "layouts/layout-demo.yml", "layouts/layout-detail.yml"))
+        Path data = root.resolve("examples");
+        Files.createDirectories(data.resolve("layouts"));
+        Files.createDirectories(data.resolve("images"));
+        for (String resource : List.of("config.yml", "layouts/layout-demo.yml", "layouts/layout-detail.yml",
+            "images/demo-diamond.png"))
             try (var input = ResourceRegressionTests.class.getResourceAsStream("/" + resource)) {
                 Files.copy(Objects.requireNonNull(input), data.resolve(resource));
             }
@@ -170,6 +178,68 @@ public final class ResourceRegressionTests {
             }
             check(count == entries.size(), "preview lost resources");
         }
+    }
+    private static void tintAndTextStretch(Path root) throws Exception {
+        Path data = root.resolve("tint-stretch");
+        Files.createDirectories(data.resolve("images"));
+        BufferedImage source = new BufferedImage(16, 16, BufferedImage.TYPE_INT_ARGB);
+        for (int y = 0; y < 16; y++) for (int x = 0; x < 16; x++) source.setRGB(x, y, 0xFFFFFFFF);
+        ImageIO.write(source, "png", data.resolve("images/sample.png").toFile());
+        var yaml = new YamlConfiguration();
+        yaml.loadFromString("""
+            schema-version: 1
+            id: probe
+            canvas: {width: 300, height: 180}
+            frontend:
+              icon:
+                type: image
+                source: sample.png
+                width: 32
+                height: 24
+                color: '#55AAFF'
+                offset: {y: 25}
+                actions: ['tell: IMAGE']
+              label:
+                type: text
+                content: 'A中'
+                size: 8
+                width: 100
+                scale: {x: 1.5, y: 2}
+                offset: {y: -20}
+                actions: ['tell: TEXT']
+            """);
+        var document = LayoutStore.parse("probe", yaml);
+        var renderer = new MenuRenderer(new VanillaAssets(data.resolve("images")));
+        var fonts = FontPack.create(List.of(document), renderer, PREVIEW, List.of(300), 131072);
+        TextStyle stretched = new TextStyle(8, 1.5, 2);
+        check(fonts.textFont(stretched, MenuText.parse("A中")).value().equals(stretched.name()),
+            "Text scale uses a prepared independent font variant");
+        check(fonts.textWidth(MenuText.parse("A中"), stretched) > fonts.textWidth(MenuText.parse("A中"), 8),
+            "Horizontal stretch changes measured text advance");
+        Path pack = data.resolve("pack");
+        fonts.write(pack);
+        String json = Files.readString(pack.resolve("assets/dialogmenu/font/" + stretched.name() + ".json"));
+        check(JsonParser.parseString(json).getAsJsonObject().getAsJsonArray("providers").get(0)
+            .getAsJsonObject().get("height").getAsInt() == stretched.height(),
+            "Vertical stretch changes exported glyph height");
+        Path imageAtlas = pack.resolve("assets/dialogmenu/textures/generated/rgba_image_atlas_0.png");
+        BufferedImage atlas = ImageIO.read(imageAtlas.toFile());
+        check((atlas.getRGB(1, 0) >>> 24) == fonts.imageTint(0xFF55AAFF),
+            "Image atlas stores tint index in metadata alpha");
+        List<String> callbacks = new ArrayList<>();
+        var output = new SpriteCanvas().encode(document.menu(),
+            renderer.draw(document.menu(), PREVIEW, 300, 131072), PREVIEW, fonts, region -> {
+                callbacks.add(region.id());
+                return ClickEvent.runCommand("/" + region.id());
+            });
+        check(callbacks.equals(List.of("frontend.icon", "frontend.label")),
+            "Tint and stretched elements preserve their bound interactions");
+        check(MenuText.glyphs(output.component()).stream().anyMatch(g -> g.style().font() != null
+            && g.style().font().value().equals(stretched.name())),
+            "Rendered text references its stretched font");
+        check(MenuText.glyphs(output.component()).stream().anyMatch(g -> g.style().font() != null
+            && g.style().font().value().equals("text_hit_all") && g.style().clickEvent() != null),
+            "Text hit proxy follows the stretched font and keeps its action");
     }
     private static void publication() throws Exception {
         var publication = new ResourcePublication<String>();

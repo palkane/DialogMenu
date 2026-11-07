@@ -32,23 +32,24 @@ final class RgbaImages {
         return 0x800000 | (width - 1) << 14 | (height - 1) << 5 | localY & 31;
     }
 
-    private String key(Sprite sprite) {
-        return hashes.computeIfAbsent(sprite.original(), FontPack::hash) + ":" + wholeTop(sprite.y());
+    private String key(Sprite sprite, int tint) {
+        return hashes.computeIfAbsent(sprite.original(), FontPack::hash) + ":" + wholeTop(sprite.y()) + ":" + tint;
     }
     private static int wholeTop(int top) { return top - top % CanvasRows.HEIGHT; }
 
-    void prepare(Sprite sprite, boolean interactive) {
-        images.computeIfAbsent(key(sprite), key -> {
-            BufferedImage image = wrap(sprite.original());
+    void prepare(Sprite sprite, boolean interactive, int tint) {
+        images.computeIfAbsent(key(sprite, tint), key -> {
+            BufferedImage image = wrap(sprite.original(), tint);
             return new Entry(new Glyph(0xE000 + images.size(), 2),
-                "generated/rgba_image_" + hashes.get(sprite.original()) + ".png", image, wholeTop(sprite.y()));
+                "generated/rgba_image_" + hashes.get(sprite.original()) + "_" + tint + ".png",
+                image, wholeTop(sprite.y()));
         });
         if (interactive) for (Tile tile : tiles(sprite.width(), sprite.height()))
             hits.computeIfAbsent(new Hit(sprite.y() + tile.y(), tile.size()), key -> 0xF0000 + hits.size());
     }
 
-    Glyph glyph(Sprite sprite) {
-        Entry entry = images.get(key(sprite));
+    Glyph glyph(Sprite sprite, int tint) {
+        Entry entry = images.get(key(sprite, tint));
         if (entry == null) throw new IllegalArgumentException("图片已变化，请重新生成资源包");
         return entry.glyph();
     }
@@ -83,7 +84,8 @@ final class RgbaImages {
         return true;
     }
 
-    static BufferedImage wrap(BufferedImage source) {
+    static BufferedImage wrap(BufferedImage source) { return wrap(source, 0); }
+    static BufferedImage wrap(BufferedImage source, int tint) {
         int width = Math.max(source.getWidth(), source.getHeight()) + 2, height = width;
         BufferedImage result = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
         result.setRGB(1, 1, source.getWidth(), source.getHeight(),
@@ -93,7 +95,8 @@ final class RgbaImages {
         for (int i = 0; i < corners.length; i++) {
             int x = corners[i][0], y = corners[i][1];
             result.setRGB(x, y, (width - 1) << 24 | 0x001D5300 | 149 + i);
-            result.setRGB(x == 0 ? 1 : x - 1, y, 0x010000B1 | source.getWidth() << 16 | source.getHeight() << 8);
+            result.setRGB(x == 0 ? 1 : x - 1, y,
+                tint << 24 | 0x000000B1 | source.getWidth() << 16 | source.getHeight() << 8);
         }
         return result;
     }
@@ -101,13 +104,47 @@ final class RgbaImages {
     void write(Path pack) throws IOException {
         Path base = pack.resolve("assets/dialogmenu");
         List<Object> providers = new ArrayList<>();
-        Set<String> written = new HashSet<>();
+        Map<Integer, Map<String, List<Entry>>> groups = new LinkedHashMap<>();
         for (Entry entry : images.values()) {
             BuildBudget.checkpoint();
-            if (written.add(entry.texture()))
-                FontPack.writePng(entry.image(), base.resolve("textures/" + entry.texture()));
-            providers.add(FontPack.bitmap(entry.texture(), 1, -entry.top(),
-                List.of(Character.toString(entry.glyph().code()))));
+            groups.computeIfAbsent(entry.image().getWidth(), key -> new LinkedHashMap<>())
+                .computeIfAbsent(entry.texture(), key -> new ArrayList<>()).add(entry);
+        }
+        int sequence = 0;
+        for (var group : groups.entrySet()) {
+            int size = group.getKey();
+            List<List<Entry>> cells = new ArrayList<>(group.getValue().values());
+            // 每张图集最多16×16格，单格不超过256px，整图不超过4096px。
+            for (int start = 0; start < cells.size(); start += 256) {
+                BuildBudget.checkpoint();
+                var chunk = cells.subList(start, Math.min(start + 256, cells.size()));
+                int columns = Math.min(16, chunk.size()), rows = (chunk.size() + columns - 1) / columns;
+                BufferedImage atlas = new BufferedImage(columns * size, rows * size, BufferedImage.TYPE_INT_ARGB);
+                Set<Integer> tops = new TreeSet<>();
+                for (int i = 0; i < chunk.size(); i++) {
+                    BufferedImage image = chunk.get(i).getFirst().image();
+                    atlas.setRGB(i % columns * size, i / columns * size, size, size,
+                        image.getRGB(0, 0, size, size, null, 0, size), 0, size);
+                    for (Entry entry : chunk.get(i)) tops.add(entry.top());
+                }
+                String texture = "generated/rgba_image_atlas_" + sequence++ + ".png";
+                FontPack.writePng(atlas, base.resolve("textures/" + texture));
+                for (int top : tops) {
+                    List<String> chars = new ArrayList<>();
+                    for (int row = 0; row < rows; row++) {
+                        StringBuilder line = new StringBuilder();
+                        for (int column = 0; column < columns; column++) {
+                            int index = row * columns + column, code = 0;
+                            if (index < chunk.size())
+                                for (Entry entry : chunk.get(index))
+                                    if (entry.top() == top) code = entry.glyph().code();
+                            line.appendCodePoint(code);
+                        }
+                        chars.add(line.toString());
+                    }
+                    providers.add(FontPack.bitmap(texture, 1, -top, chars));
+                }
+            }
         }
         Gson json = new Gson();
         Files.writeString(base.resolve("font/images_rgba.json"), json.toJson(Map.of("providers", providers)) + "\n");

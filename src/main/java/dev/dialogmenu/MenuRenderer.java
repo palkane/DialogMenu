@@ -91,7 +91,7 @@ final class MenuRenderer {
                 BufferedImage layer = new BufferedImage(bounds.width, bounds.height, BufferedImage.TYPE_INT_ARGB);
                 Graphics2D g = layer.createGraphics();
                 g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
-                g.drawImage(shaderSource, 0, 0, bounds.width, bounds.height, null);
+                g.drawImage(tint(shaderSource, n.argb()), 0, 0, bounds.width, bounds.height, null);
                 g.dispose();
                 add(sprites, key, new Sprite(n.id(), bounds.x, bounds.y, layer, null, shaderSource), preview);
                 if (root != null) root.drawImage(layer, bounds.x, bounds.y, null);
@@ -100,12 +100,16 @@ final class MenuRenderer {
             if (n.source().startsWith("minecraft:") || n.reuseTexture() || n.atlas() != null
                 || assets.craftEngine.atlasReference(n.source())) {
                 var reference = assets.reference(n.source(), n.atlas());
+                boolean vanillaBitmap = n.source().startsWith("minecraft:");
+                if (!vanillaBitmap && (n.argb() & 0xFFFFFF) != 0xFFFFFF)
+                    throw new IOException(n.id() + " 外部纹理直引暂不支持染色；请使用自有PNG或color='#FFFFFF'");
                 if (n.rotation() != 0 || n.argb() >>> 24 != 255 || !bounds.equals(unclipped)
                     || Math.abs(n.width() * n.scaleX() / (n.height() * n.scaleY())
                         - reference.image().getWidth() / (double) reference.image().getHeight()) > 1e-7)
                     throw new IOException(n.id() + " 纹理直引须完整显示、等比缩放、不旋转且opacity=255");
                 // 只导出字体 provider，原纹理由 Minecraft 或 CE 提供。
-                if (root != null) root.drawImage(reference.image(), bounds.x, bounds.y, bounds.width, bounds.height, null);
+                if (root != null) root.drawImage(vanillaBitmap ? tint(reference.image(), n.argb()) : reference.image(),
+                    bounds.x, bounds.y, bounds.width, bounds.height, null);
                 // 保留显示边界，不复制源 PNG。
                 add(sprites, key, new Sprite(n.id(), bounds.x, bounds.y,
                     preview ? new BufferedImage(bounds.width, bounds.height, BufferedImage.TYPE_INT_ARGB) : null,
@@ -130,7 +134,7 @@ final class MenuRenderer {
                     g.fill(new Rectangle2D.Double(x + n.width() - t, y, t, h));
                 }
                 case "image" -> {
-                    BufferedImage texture = assets.image(n.source());
+                    BufferedImage texture = tint(assets.image(n.source()), n.argb());
                     g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, (n.argb() >>> 24) / 255f));
                     g.drawImage(texture, (int) Math.round(x), (int) Math.round(y),
                         (int) Math.round(n.width()), (int) Math.round(h), null);
@@ -157,5 +161,17 @@ final class MenuRenderer {
     }
     private static long pixels(Sprite sprite) {
         return sprite.image() == null ? 0 : (long) sprite.width() * sprite.height();
+    }
+    private static BufferedImage tint(BufferedImage source, int argb) {
+        if ((argb & 0xFFFFFF) == 0xFFFFFF) return source;
+        BufferedImage image = new BufferedImage(source.getWidth(), source.getHeight(), BufferedImage.TYPE_INT_ARGB);
+        int red = argb >> 16 & 255, green = argb >> 8 & 255, blue = argb & 255;
+        for (int y = 0; y < source.getHeight(); y++) for (int x = 0; x < source.getWidth(); x++) {
+            int pixel = source.getRGB(x, y);
+            image.setRGB(x, y, pixel & 0xFF000000
+                | ((pixel >> 16 & 255) * red / 255) << 16
+                | ((pixel >> 8 & 255) * green / 255) << 8 | (pixel & 255) * blue / 255);
+        }
+        return image;
     }
 }

@@ -17,7 +17,6 @@ final class RgbaShaders {
     static Map<String, Object> metadata() {
         return Map.of("entries", OVERLAYS.stream().map(v -> Map.of(
             "directory", v.directory(),
-            "formats", Map.of("min_inclusive", v.min(), "max_inclusive", v.max()),
             "min_format", v.minimum(), "max_format", v.maximum())).toList());
     }
 
