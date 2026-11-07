@@ -53,12 +53,10 @@ CE 图片可写 `source: craftengine:资源包目录/textures后的路径.png`�
 
 YAML 重载复用当前字库，缺少动态字符范围时拒绝应用。已应用的 YAML 与已构建的资源分别记录，后续 `reload resource/all` 会按新输入重建。缓存使用内容摘要，保留文件大小和时间戳的修改同样可发现；构建期间变化的输入会导致本轮失败，保留上一版可用 ZIP。
 
-## 外部合包发布
+## 外部发布接口
 
-使用 Nova/PlanetNova 等统一合包管线时，启用 `resource-pack-external-publisher: true`，并关闭 `craftengine-auto-reload`。CE 缓存事件只登记候选 ZIP，不提前切换服务端字体映射。发布方在主线程通过 `DialogMenuApi.preparedResources()` 获取候选代次与 ZIP，确认对应最终包上传成功后调用 `commitResources(generation)`，然后分发给玩家；失败时不提交，继续保留旧映射。过期代次会被拒绝。
+`resource-pack-external-publisher` 默认关闭。开启后，CraftEngine 缓存事件只登记候选 ZIP，服务端字体映射在显式提交后更新；首次提交前菜单不可用。
 
-没有接入 API 的管理员可在确认最终发布成功后执行 `/dialogmenu publish <版本>`，`/dialogmenu status` 可查看 published/pending。命令本身不负责上传或确认客户端已加载；外部管线应在提交之后再分发，客户端切包完成之前避免打开依赖新字形的菜单。外部模式启动后，在首次提交之前不提供菜单。未启用该模式时，保持原有准备后立即应用的兼容行为，不能把它当作跨插件发布事务。
-
-Nova 应在生成位移字体前排除 `dialogmenu:*`，精确清单不能自动覆盖未来新增 ID。DialogMenu 不使用 Nova 的 `/1`…`/19` 字体。合包应校验当前版本的文字 shader、include、palette 和字体集合；不得仅根据 JSON 文件个数推断客户端显存占用。
+外部发布方可在主线程通过 `DialogMenuApi.preparedResources()` 获取候选代次与 ZIP，在对应资源包发布成功后调用 `commitResources(generation)`。失败时不提交，过期代次会被拒绝。管理员也可通过 `/dialogmenu status` 查询状态、通过 `/dialogmenu publish <版本>` 提交候选；提交操作不代表客户端已加载资源包。
 
 `gradle check` 包含离线资源回归检查；这些检查不代表真实客户端渲染或显存验收通过。
