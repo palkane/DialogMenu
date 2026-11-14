@@ -61,6 +61,8 @@ public final class ResourceRegressionTests {
         checks += AssetLibraryTests.run(root);
         checks += DefaultGlyphTests.run(root);
         checks += InventoryAssetsTests.run(root);
+        checks += ModelCompatibilityTests.run(root);
+        checks += InventoryCompatibilityTests.run(root);
         checks += CoordinateTests.run(root);
         checks += ScaleCalibrationTests.run(root);
         checks += NativeControlsTests.run(root);

@@ -16,6 +16,15 @@ final class RegisteredImages {
     private final Map<String, Entry> entries = new LinkedHashMap<>();
     private int whiteTint;
 
+    // 菜单复用原图的像素，但必须隔离精灵名；否则 items 图集会抢占世界方块同名精灵。
+    static String nativeSpriteId(String resource) {
+        return "dialogmenu:native/" + (resource.contains(":") ? resource : "minecraft:" + resource).replace(':', '/');
+    }
+
+    private static String spriteId(Entry entry) {
+        return entry.nativeSprite() ? nativeSpriteId(entry.sprite()) : entry.sprite();
+    }
+
     static String sourceKey(BufferedImage image) { return ImageRegistry.PREFIX + "~" + FontPack.hash(image); }
 
     void prepare(Map<String, ImageRegistry.Entry> images, Collection<Integer> tints, int whiteTint) throws IOException {
@@ -52,7 +61,7 @@ final class RegisteredImages {
         JsonObject object = new JsonObject();
         object.addProperty("type", "object");
         object.addProperty("atlas", "minecraft:items");
-        object.addProperty("sprite", entry.sprite());
+        object.addProperty("sprite", spriteId(entry));
         object.addProperty("color", "#beef01");
         int payload = RgbaImages.imagePayload(height, localY, band);
         object.addProperty("shadow_color", entry.nativeSprite()
@@ -90,9 +99,12 @@ final class RegisteredImages {
         JsonObject definition = Files.isRegularFile(atlas)
             ? JsonParser.parseString(Files.readString(atlas)).getAsJsonObject() : new JsonObject();
         JsonArray sources = definition.has("sources") ? definition.getAsJsonArray("sources") : new JsonArray();
+        Set<String> emitted = new HashSet<>();
+        for (Entry entry : entries.values()) emitted.add(spriteId(entry));
         for (var iterator = sources.iterator(); iterator.hasNext();) {
             JsonObject source = iterator.next().getAsJsonObject();
-            if (source.has("resource") && source.get("resource").getAsString().startsWith("dialogmenu:registered/"))
+            if (source.has("resource") && source.get("resource").getAsString().startsWith("dialogmenu:registered/")
+                || source.has("sprite") && emitted.contains(source.get("sprite").getAsString()))
                 iterator.remove();
         }
         for (Entry entry : entries.values()) {
@@ -106,11 +118,44 @@ final class RegisteredImages {
             JsonObject source = new JsonObject();
             source.addProperty("type", "single");
             source.addProperty("resource", entry.sprite());
-            source.addProperty("sprite", entry.sprite());
+            source.addProperty("sprite", spriteId(entry));
             sources.add(source);
         }
         definition.add("sources", sources);
         Files.createDirectories(atlas.getParent());
         Files.writeString(atlas, new Gson().toJson(definition) + "\n");
+        write26_2Fallbacks(pack, definition);
+    }
+    /** 26.2 中不存在的新版本图标使用内置像素，已有原版图标继续复用客户端材质。 */
+    private void write26_2Fallbacks(Path pack, JsonObject definition) throws IOException {
+        Set<String> missing = new HashSet<>();
+        try (var input = RegisteredImages.class.getResourceAsStream("/inventory/sprites-after-26_2.json")) {
+            if (input == null) throw new IOException("Missing 26.2 sprite compatibility list");
+            for (var sprite : JsonParser.parseReader(new java.io.InputStreamReader(input,
+                java.nio.charset.StandardCharsets.UTF_8)).getAsJsonArray()) missing.add(sprite.getAsString());
+        }
+        Map<String, Entry> fallbacks = new HashMap<>();
+        for (Entry entry : entries.values())
+            if (entry.nativeSprite() && missing.contains(entry.sprite())) fallbacks.put(spriteId(entry), entry);
+        Path overlay = pack.resolve("dialogmenu_26_2/assets/minecraft/atlases/items.json");
+        if (fallbacks.isEmpty()) {
+            Files.deleteIfExists(overlay);
+            return;
+        }
+        JsonObject compatible = definition.deepCopy();
+        for (var source : compatible.getAsJsonArray("sources")) {
+            JsonObject row = source.getAsJsonObject();
+            if (!row.has("sprite")) continue;
+            Entry entry = fallbacks.get(row.get("sprite").getAsString());
+            if (entry == null) continue;
+            String relative = "inventory_26_2/" + FontPack.hash(entry.source());
+            Path png = pack.resolve("assets/dialogmenu/textures/" + relative + ".png");
+            Files.createDirectories(png.getParent());
+            // nativeScope 的对象使用普通图集像素，不能写入 registered 图片的协议边框。
+            FontPack.writePng(entry.source(), png);
+            row.addProperty("resource", "dialogmenu:" + relative);
+        }
+        Files.createDirectories(overlay.getParent());
+        Files.writeString(overlay, new Gson().toJson(compatible) + "\n");
     }
 }

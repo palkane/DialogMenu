@@ -460,10 +460,11 @@ final class ImageRegistryTests {
     private static int userRegistrations(JsonArray sources) throws Exception {
         Set<String> defaults = new HashSet<>();
         for (var image : InventoryAssets.images().values()) defaults.add(FontPack.hash(image.image()));
-        Set<String> nativeSprites = new HashSet<>(InventoryAssets.nativeSprites().values());
+        Set<String> nativeSprites = new HashSet<>();
+        InventoryAssets.nativeSprites().values().forEach(value -> nativeSprites.add(RegisteredImages.nativeSpriteId(value)));
         return (int) sources.asList().stream().filter(value -> {
             String sprite = value.getAsJsonObject().get("sprite").getAsString();
-            return !sprite.startsWith("dialogmenu:registered/tile_") && !nativeSprites.contains(sprite)
+            return !sprite.startsWith("dialogmenu:registered/tile_") && !sprite.startsWith("dialogmenu:model/") && !nativeSprites.contains(sprite)
                 && defaults.stream().noneMatch(hash -> sprite.startsWith("dialogmenu:registered/" + hash + "_"));
         }).count();
     }

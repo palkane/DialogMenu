@@ -551,7 +551,8 @@ final class FontPack {
         write(target, progress, tasks, false);
     }
     void writeBase(Path target, IntConsumer progress, BuildTasks tasks) throws IOException {
-        write(target, progress, tasks, true);
+        // 快照包含模型表与纹理，独立导出方不需要推断额外的资源依赖。
+        write(target, progress, tasks, false);
     }
     private void write(Path target, IntConsumer progress, BuildTasks tasks, boolean separateModels) throws IOException {
         Path base = target.resolve("assets/dialogmenu");

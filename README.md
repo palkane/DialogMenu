@@ -1,5 +1,7 @@
 # DialogMenu
 
+性能测试见 [BENCHMARKS.md](BENCHMARKS.md)：`gradle benchmarkSmoke` 校验测试场景，`gradle benchmark` 运行独立的 JMH 基准；测试代码和依赖不进入插件 JAR。
+
 基于原版 Dialog 的 Minecraft 菜单插件。使用 YAML 配置文字、图片、点击动作和动态内容，支持 Java API、共享字库、图片染色及图片/文字拉伸。普通玩家无需安装 Mod，需接受服务器资源包。
 初期阶段，性能释放材质重载方案和实现方式并不好看，请见谅
 
@@ -49,6 +51,12 @@ gradle build
 玩家发起重载时默认显示阶段百分比 BossBar；`reload-progress-bossbar: false` 可关闭。控制台每5秒记录重载阶段、百分比与耗时，结束反馈菜单数及耗时。
 
 CE 图片可写 `source: craftengine:资源包目录/textures后的路径.png`，`.png` 可省略。旧 image/item/icon ID 需在 `craftengine-definitions` 列出定义文件，不自动扫描全部 CE 配置。
+
+## 26.2 模型兼容
+
+26.2 的单一 `items` 图集使用独立的 `dialogmenu:model/` 和 `dialogmenu:native/` sprite 名称。模型表、图集条目与必要的纹理随字体快照一起导出；原版世界图集不会随模型包注入。GLSL 330 分支在原生布局收尾前处理模型几何，支持既有菜单的点击与缩放路径。
+
+继续使用经校验的外置原版资源库，无需下载另一套 26.2 库。对于 26.2 缺少的新版图标和模型纹理，导出插件命名空间中的像素回退；已有客户端纹理继续按原路径复用。合包时保留 `pack.mcmeta` 的 overlays 及 `dialogmenu_*` 目录。
 
 ## 动态文本与重载
 

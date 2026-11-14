@@ -59,7 +59,7 @@ final class MenuOpeners {
                 } else if (!ce.matches("[a-z0-9_.-]+:[a-z0-9_/.-]+"))
                     throw new IllegalArgumentException("craftengine须为完整物品ID");
                 String nbt = spec.getString("nbt", "");
-                if (!nbt.isBlank()) TagStringIO.get().asCompound(nbt);
+                if (!nbt.isBlank()) TagStringIO.builder().build().asCompound(nbt);
                 String action = key(spec.getString("action", "RIGHT_CLICK"));
                 if (!action.endsWith("RIGHT_CLICK") && !action.endsWith("LEFT_CLICK"))
                     throw new IllegalArgumentException("物品action须为LEFT_CLICK/RIGHT_CLICK及其SHIFT/SPRINT组合");
@@ -145,7 +145,7 @@ final class MenuOpeners {
             for (int i = 0; i < lore.size(); i++) if (!sameText(lore.get(i), MenuText.parse(spec.lore().get(i)))) return false;
         }
         return spec.nbt().isBlank() || contains(customData(read(item.serializeAsBytes())),
-            TagStringIO.get().asCompound(spec.nbt()));
+            TagStringIO.builder().build().asCompound(spec.nbt()));
     }
 
     static boolean sameText(Component actual, Component expected) {
@@ -171,7 +171,7 @@ final class MenuOpeners {
         }
         if (!spec.nbt().isBlank()) {
             CompoundBinaryTag original = read(item.serializeAsBytes());
-            CompoundBinaryTag merged = merge(customData(original), TagStringIO.get().asCompound(spec.nbt()));
+            CompoundBinaryTag merged = merge(customData(original), TagStringIO.builder().build().asCompound(spec.nbt()));
             CompoundBinaryTag components = original.getCompound("components").put("minecraft:custom_data", merged);
             item = ItemStack.deserializeBytes(write(original.put("components", components)));
         }

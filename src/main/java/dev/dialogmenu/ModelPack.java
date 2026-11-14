@@ -204,6 +204,8 @@ final class ModelPack {
         } finally { Files.deleteIfExists(temp); }
     }
     List<Path> paths(Path data) throws IOException {
+        // 26.2 的完整字体快照已经包含模型资源，不再向合包方暴露原始世界图集。
+        if (InventoryAssets.usesItemsAtlas()) return List.of();
         List<Path> result = new ArrayList<>();
         for (String kind : List.of("vanilla", "ce")) {
             byte[] bytes = Base64.getDecoder().decode(packs.get(kind));
@@ -213,17 +215,72 @@ final class ModelPack {
         }
         return List.copyOf(result);
     }
+    static String itemSprite(String sprite) { return "dialogmenu:model/" + sprite.replace(':', '/'); }
+    // 已校验源库比 26.2 客户端新增的模型纹理；仅为这些纹理导出快照。
+    private static final Set<String> MISSING_26_2 = Set.of(
+        "minecraft:block/orange_poplar_leaves", "minecraft:block/poplar_log",
+        "minecraft:block/poplar_log_top", "minecraft:block/poplar_planks", "minecraft:block/poplar_shelf",
+        "minecraft:block/poplar_trapdoor", "minecraft:block/red_poplar_leaves", "minecraft:block/shelf_mushroom_stage0",
+        "minecraft:block/straw_bed", "minecraft:block/stripped_poplar_log",
+        "minecraft:block/stripped_poplar_log_top", "minecraft:block/yellow_poplar_leaves");
+    private static String itemTexture(String sprite) { return "dialogmenu:model_texture/" + sprite.replace(':', '/'); }
+    private static String texturePath(String id) {
+        return "assets/" + id.replace(":", "/textures/") + ".png";
+    }
     void write(Path target) throws IOException {
         for (String value : packs.values())
             try (var input = new ZipInputStream(new ByteArrayInputStream(Base64.getDecoder().decode(value)))) {
                 for (ZipEntry entry; (entry = input.getNextEntry()) != null;) {
                     if (entry.getName().equals("pack.mcmeta") || entry.isDirectory()) continue;
+                    // items-only 协议不导出原始世界图集，避免覆盖客户端或其他资源包的规则。
+                    if (InventoryAssets.usesItemsAtlas() && entry.getName().contains("/atlases/")
+                            && !entry.getName().equals("assets/minecraft/atlases/items.json")) continue;
                     Path path = target.resolve(entry.getName()).normalize();
                     if (!path.startsWith(target.normalize())) throw new IOException("Invalid model pack entry");
                     Files.createDirectories(path.getParent());
-                    Files.write(path, input.readAllBytes());
+                    byte[] bytes = input.readAllBytes();
+                    if (entry.getName().contains("/atlases/") && entry.getName().endsWith(".json")
+                            && Files.isRegularFile(path)) {
+                        JsonObject existing = JsonParser.parseString(Files.readString(path)).getAsJsonObject();
+                        JsonObject incoming = JsonParser.parseString(new String(bytes, StandardCharsets.UTF_8)).getAsJsonObject();
+                        for (JsonElement source : incoming.getAsJsonArray("sources"))
+                            if (!existing.getAsJsonArray("sources").contains(source)) existing.getAsJsonArray("sources").add(source);
+                        bytes = existing.toString().getBytes(StandardCharsets.UTF_8);
+                    }
+                    Files.write(path, bytes);
                 }
             }
+        if (InventoryAssets.usesItemsAtlas()) writeItemSprites(target);
+    }
+    private void writeItemSprites(Path target) throws IOException {
+        Path path = target.resolve("assets/minecraft/atlases/items.json");
+        JsonObject atlas = Files.isRegularFile(path)
+            ? JsonParser.parseString(Files.readString(path)).getAsJsonObject() : new JsonObject();
+        JsonArray sources = atlas.has("sources") ? atlas.getAsJsonArray("sources") : new JsonArray();
+        Set<String> sprites = new TreeSet<>();
+        for (var faces : models.values()) for (Face face : faces) sprites.add(face.sprite());
+        for (String sprite : sprites) {
+            String resource = sprite;
+            if (MISSING_26_2.contains(sprite)) {
+                String input = texturePath(sprite);
+                resource = itemTexture(sprite);
+                Path destination = target.resolve(texturePath(resource));
+                byte[] bytes = InventoryAssets.files().get(input);
+                if (bytes == null) throw new IOException("Missing prepared model texture: " + sprite);
+                Files.createDirectories(destination.getParent());
+                Files.write(destination, bytes);
+                byte[] metadata = InventoryAssets.files().get(input + ".mcmeta");
+                if (metadata != null) Files.write(destination.resolveSibling(destination.getFileName() + ".mcmeta"), metadata);
+            }
+            JsonObject entry = new JsonObject();
+            entry.addProperty("type", "minecraft:single");
+            entry.addProperty("resource", resource);
+            entry.addProperty("sprite", itemSprite(sprite));
+            if (!sources.contains(entry)) sources.add(entry);
+        }
+        atlas.add("sources", sources);
+        Files.createDirectories(path.getParent());
+        Files.writeString(path, atlas.toString() + "\n");
     }
     Component component(String id, int size, int offset, int band) {
         List<Face> faces = models.get(id);
@@ -238,7 +295,7 @@ final class ModelPack {
             JsonObject part = new JsonObject();
             part.addProperty("type", "object");
             part.addProperty("atlas", face.atlas());
-            part.addProperty("sprite", face.sprite());
+            part.addProperty("sprite", InventoryAssets.usesItemsAtlas() ? itemSprite(face.sprite()) : face.sprite());
             part.addProperty("color", "#beef01");
             part.addProperty("shadow_color", payload);
             parts.add(part);
@@ -254,7 +311,7 @@ final class ModelPack {
         Component result = GsonComponentSerializer.gson().deserialize(json.toString());
         String encoded = GsonComponentSerializer.gson().serialize(result);
         if (!encoded.contains("\"sprite\""))
-            throw new IllegalStateException("model需要支持object文本的Minecraft/Adventure（26.3）");
+            throw new IllegalStateException("model需要支持sprite组件的Minecraft/Adventure（26.2及以上）");
         return result;
     }
     static String faceMove(int face, boolean restore) {
@@ -289,7 +346,24 @@ final class ModelPack {
             if (input == null) throw new IOException("Missing model shader");
             Path path = target.resolve("assets/dialogmenu/shaders/include/model_vertex.glsl");
             Files.createDirectories(path.getParent());
-            Files.writeString(path, new String(input.readAllBytes(), StandardCharsets.UTF_8));
+            String shader = new String(input.readAllBytes(), StandardCharsets.UTF_8);
+            Files.writeString(path, shader);
+            // 26.2 使用 GLSL 330，按名称链接 varying，四顶点使用 gl_VertexID。
+            Files.writeString(path.resolveSibling("model_vertex_26_2.glsl"), shader
+                .replace("layout(location = 7) flat out", "flat out")
+                .replace("(gl_VertexIndex - gl_BaseVertex)", "gl_VertexID"));
         }
+        Path vertex26Path = target.resolve("dialogmenu_26_2/assets/minecraft/shaders/core/text.vsh");
+        String vertex26 = Files.readString(vertex26Path)
+            .replace("void main() {", "#ifdef IS_GUI\n#moj_import <dialogmenu_vanilla:models.glsl>\n"
+                + "#moj_import <dialogmenu_ce:models.glsl>\n#moj_import <dialogmenu:model_vertex_26_2.glsl>\n#endif\n\nvoid main() {")
+            .replace("    dialogmenu_finish_native(position);",
+                "#ifdef IS_GUI\n    dialogmenu_model(position, imageUv);\n#endif\n    dialogmenu_finish_native(position);");
+        Files.writeString(vertex26Path, vertex26);
+        Path fragment26Path = target.resolve("dialogmenu_26_2/assets/minecraft/shaders/core/text.fsh");
+        String fragment26 = Files.readString(fragment26Path)
+            .replace("void main() {", "#ifdef IS_GUI\nflat in float dialogmenuModelVisible;\n#endif\n\nvoid main() {")
+            .replace("    vec2 uv = texCoord0;", "#ifdef IS_GUI\n    if (dialogmenuModelVisible < 0.5) discard;\n#endif\n    vec2 uv = texCoord0;");
+        Files.writeString(fragment26Path, fragment26);
     }
 }

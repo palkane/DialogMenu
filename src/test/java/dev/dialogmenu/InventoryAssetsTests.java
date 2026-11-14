@@ -71,12 +71,12 @@ final class InventoryAssetsTests {
             var snapshot = engine.prepare().get().snapshot();
             packs = new ArrayList<>(snapshot.fonts().modelPacks(data));
             packs.add(snapshot.pack());
-            check(packs.size() == 3 && !Files.exists(data.resolve("models/settings.json")),
+            check(packs.size() == (InventoryAssets.usesItemsAtlas() ? 1 : 3) && !Files.exists(data.resolve("models/settings.json")),
                 "Default library is prepared even without references or client/compiler settings");
             long defaultBytes = 0;
             for (Path pack : packs) defaultBytes += Files.size(pack);
-            check(defaultBytes <= 128 * 1024,
-                "Default inventory-only A menu must fit in 128 KiB, not per-face/per-icon texture copies");
+            check(defaultBytes <= 192 * 1024,
+                "Complete inventory-only A snapshot must fit in 192 KiB, not per-face texture copies: " + defaultBytes);
             for (Path pack : packs) {
                 bytes.put(pack, Files.readAllBytes(pack));
                 stamps.put(pack, Files.getLastModifiedTime(pack));

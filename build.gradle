@@ -84,3 +84,54 @@ tasks.register('regressionTest', JavaExec) {
 check.dependsOn regressionTest
 // 回归入口为上面的JavaExec，无需为main式检查引入测试框架。
 test.failOnNoDiscoveredTests = false
+
+// 独立的性能测试源码集；JMH 和测试素材不会进入发布 JAR。
+sourceSets {
+    benchmark {
+        compileClasspath += sourceSets.main.output + configurations.testRuntimeClasspath
+        runtimeClasspath += output + compileClasspath
+    }
+}
+dependencies {
+    def offlineBench = System.getenv('DIALOGMENU_BENCHMARK_CLASSPATH')
+    if (offlineBench) {
+        benchmarkImplementation files(offlineBench.split(java.io.File.pathSeparator))
+        benchmarkAnnotationProcessor files(offlineBench.split(java.io.File.pathSeparator))
+    } else {
+        benchmarkImplementation 'org.openjdk.jmh:jmh-core:1.37'
+        benchmarkAnnotationProcessor 'org.openjdk.jmh:jmh-generator-annprocess:1.37'
+    }
+}
+processBenchmarkResources {
+    from('src/main/resources') {
+        include 'glyphs.bin.gz', 'vanilla-icons.zip', 'vanilla-inventory.zip'
+    }
+}
+tasks.register('benchmark', JavaExec) {
+    group = 'verification'
+    description = 'Run opt-in offline JMH benchmarks (not included in check).'
+    dependsOn benchmarkClasses
+    classpath = sourceSets.benchmark.runtimeClasspath
+    mainClass = 'org.openjdk.jmh.Main'
+    systemProperty 'java.awt.headless', 'true'
+    def destination = providers.gradleProperty('benchmarkOutput').getOrElse('build/reports/benchmarks/results.json')
+    doFirst { file(destination).absoluteFile.parentFile.mkdirs() }
+    args '-prof', 'gc', '-rf', 'json', '-rff', destination, '-foe', 'true'
+    args providers.gradleProperty('benchmarkArgs').getOrElse('dev.dialogmenu.*Benchmark').split(' ').findAll { it }
+}
+tasks.register('benchmarkSmoke', JavaExec) {
+    group = 'verification'
+    description = 'Verify benchmark fixtures and observable results without timing assertions.'
+    dependsOn benchmarkClasses
+    classpath = sourceSets.benchmark.runtimeClasspath
+    mainClass = 'dev.dialogmenu.BenchmarkSmoke'
+    systemProperty 'java.awt.headless', 'true'
+}
+tasks.register('benchmarkClasspath') {
+    dependsOn benchmarkClasses
+    doLast {
+        def destination = layout.buildDirectory.file('benchmark/classpath.txt').get().asFile
+        destination.parentFile.mkdirs()
+        destination.text = sourceSets.benchmark.runtimeClasspath.asPath
+    }
+}

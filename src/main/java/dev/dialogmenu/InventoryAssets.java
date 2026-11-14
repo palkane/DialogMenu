@@ -6,12 +6,29 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.zip.*;
 import javax.imageio.ImageIO;
+import net.kyori.adventure.text.serializer.gson.GsonComponentSerializer;
 
 /** Precompiled default inventory appearances; never scans unrelated vanilla textures. */
 final class InventoryAssets {
     private static Map<String, byte[]> files;
     private static Map<String, ImageRegistry.Entry> images;
     private static Map<String, String> nativeSprites;
+
+    private static final boolean ITEMS_ATLAS = detectItemsAtlas();
+
+    static boolean usesItemsAtlas() { return ITEMS_ATLAS; }
+
+    // 按序列化能力选择协议分支；26.2 的 sprite 组件不再保留 atlas 字段。
+    private static boolean detectItemsAtlas() {
+        try {
+            var serializer = GsonComponentSerializer.gson();
+            String encoded = serializer.serialize(serializer.deserialize(
+                "{\"type\":\"object\",\"atlas\":\"minecraft:blocks\",\"sprite\":\"minecraft:block/stone\"}"));
+            return encoded.contains("\"sprite\"") && !encoded.contains("\"atlas\"");
+        } catch (RuntimeException unsupported) {
+            return false;
+        }
+    }
 
     static synchronized void prepare(AssetLibrary library) throws IOException {
         if (files == null) {
