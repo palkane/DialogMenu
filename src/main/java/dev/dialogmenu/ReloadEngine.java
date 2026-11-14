@@ -38,7 +38,7 @@ final class ReloadEngine implements AutoCloseable {
                     Path resourceRoot, int resourceBuildCpuPercent, int resourceBuildThreads, List<String> craftEngineDefinitions,
                     List<Integer> textColors, boolean reloadProgressBossBar, boolean reuseCompiledCache,
                     List<Double> canvasScales, double defaultCanvasScale, List<MenuOpeners.Rule> openers,
-                    boolean hideDialogWarning, boolean hideScrollbar) {}
+                    boolean hideDialogWarning, boolean hideScrollbar, ResourceVersion resourceVersion) {}
     record Stamp(long size, FileTime modified, String digest) {}
     record Snapshot(Map<String, LayoutStore.Document> documents, VanillaAssets assets, MenuRenderer renderer,
                     FontPack fonts, Settings settings, Path pack, Map<Path, Stamp> inputs,
@@ -100,10 +100,10 @@ final class ReloadEngine implements AutoCloseable {
         }, worker);
     }
     String libraryStatus() { return libraryStatus; }
-    private void prepareLibrary(Consumer<Progress> progress) throws IOException {
+    private void prepareLibrary(ResourceVersion version, Consumer<Progress> progress) throws IOException {
         libraryStatus = "准备中";
         try {
-            new AssetLibrary(data).prepare(stage -> progress.accept(new Progress(5, stage)));
+            new AssetLibrary(data, version).prepare(stage -> progress.accept(new Progress(5, stage)));
             libraryStatus = "就绪";
         } catch (IOException error) {
             libraryStatus = "失败";
@@ -114,7 +114,7 @@ final class ReloadEngine implements AutoCloseable {
     CompletableFuture<Startup> startup(Consumer<Progress> progress) {
         return CompletableFuture.supplyAsync(() -> {
             try {
-                prepareLibrary(progress);
+                progress.accept(new Progress(5, "恢复快照及对应版本资源"));
                 Result restored = restored();
                 if (reuseCompiledCache) return new Startup(restored, null);
                 try {
@@ -127,7 +127,11 @@ final class ReloadEngine implements AutoCloseable {
     }
     private Result restored() throws Exception {
         if (latest == null) {
-            var saved = persisted().load();
+            libraryStatus = "准备中";
+            CompiledSnapshot.Loaded saved;
+            try { saved = persisted().load(); }
+            catch (Exception error) { libraryStatus = "失败"; throw error; }
+            libraryStatus = "就绪";
             saved.snapshot().presentations().prepare(saved.snapshot(), preview);
             latest = saved.snapshot();
             builtInputs = saved.builtInputs();
@@ -234,12 +238,13 @@ final class ReloadEngine implements AutoCloseable {
         if (settings.hideDialogWarning() != latest.settings().hideDialogWarning()
             || settings.hideScrollbar() != latest.settings().hideScrollbar())
             throw new IllegalArgumentException("原生警告或滚动条隐藏设置已变化，请执行 /dialogmenu reload all 并接收新资源包；旧布局保留");
-        if (!settings.resourceRoot().equals(latest.settings().resourceRoot())
+        if (!settings.resourceVersion().equals(latest.settings().resourceVersion())
+            || !settings.resourceRoot().equals(latest.settings().resourceRoot())
             || !settings.craftEngineDefinitions().equals(latest.settings().craftEngineDefinitions())
             || !latest.settings().textScales().containsAll(settings.textScales())
             || !latest.settings().canvasScales().containsAll(settings.canvasScales())
             || !latest.settings().textColors().containsAll(settings.textColors()))
-            throw new IllegalArgumentException("资源目录、CE定义文件、字体倍率或颜色范围已变化，请执行 /dialogmenu reload all；旧布局保留");
+            throw new IllegalArgumentException("资源版本、目录、CE定义文件、字体倍率或颜色范围已变化，请执行 /dialogmenu reload all；旧布局保留");
         progress.update(35, "解析全部菜单");
         var documents = new LayoutStore(data.resolve("layouts")).load();
         if (!documents.containsKey(settings.defaultLayout()))
@@ -291,7 +296,8 @@ final class ReloadEngine implements AutoCloseable {
             List.copyOf(LayoutStore.strings(yaml.get("craftengine-definitions"))), List.copyOf(colors),
             yaml.getBoolean("reload-progress-bossbar", true), yaml.getBoolean("reuse-compiled-cache", false),
             canvasScales, defaultCanvas, MenuOpeners.parse(yaml),
-            yaml.getBoolean("hide-dialog-warning", false), yaml.getBoolean("hide-scrollbar", false));
+            yaml.getBoolean("hide-dialog-warning", false), yaml.getBoolean("hide-scrollbar", false),
+            new ResourceVersion(yaml.getString("resource-version", ResourceVersion.DEFAULT.id())));
     }
     private Result build(Mode mode, ProgressReporter progress) throws Exception {
         long start = System.nanoTime();
@@ -300,12 +306,12 @@ final class ReloadEngine implements AutoCloseable {
         else cache.prune(latest.pack());
         if (mode == Mode.RESOURCE && latest == null)
             throw new IllegalStateException("尚无已编译资源，请执行 /dialogmenu reload all");
-        prepareLibrary(step -> progress.update(step.percent(), step.stage()));
         // 仅资源重载不读取磁盘上的待应用布局或配置。
         boolean all = mode == Mode.ALL || mode == Mode.FULL;
         progress.update(10, "读取重载配置");
         Map<Path, Stamp> yamlInputs = all ? yamlInputs() : latest.inputs();
         Settings settings = all ? settings() : latest.settings();
+        prepareLibrary(settings.resourceVersion(), step -> progress.update(step.percent(), step.stage()));
         progress.update(15, "准备菜单和资源清单");
         try (var budget = BuildBudget.open(settings.resourceBuildCpuPercent());
              var tasks = new BuildTasks(settings.resourceBuildThreads(), settings.resourceBuildCpuPercent())) {
@@ -318,16 +324,17 @@ final class ReloadEngine implements AutoCloseable {
         boolean full = mode == Mode.FULL;
         var documents = all ? new LayoutStore(data.resolve("layouts")).load() : latest.documents();
         List<LayoutStore.Document> catalog = MenuTemplate.catalog(documents.values());
-        ModelPack models = full || latest == null || !sameModelInputs(latest.resourceInputs())
+        boolean versionChanged = latest == null || !settings.resourceVersion().equals(latest.settings().resourceVersion());
+        ModelPack models = full || versionChanged || !sameModelInputs(latest.resourceInputs())
             || !ModelPack.matches(latest.fonts().modelPack(), catalog)
-            ? ModelPack.prepare(data, catalog) : latest.fonts().modelPack();
+            ? ModelPack.prepare(data, catalog, settings.resourceVersion()) : latest.fonts().modelPack();
         if (all) {
             progress.update(17, "后台缓存编辑器纹理与方块素材");
             new DialogMenuEditorFiles(data, settings.resourceRoot()).preload(full,
                 (done, total) -> progress.update(17 + done * 2 / Math.max(1, total),
                     "缓存编辑器素材 " + done + "/" + total));
         }
-        if (!full && latest != null && builtInputs.equals(yamlInputs)
+        if (!full && !versionChanged && builtInputs.equals(yamlInputs)
             && latest.resourceInputs().equals(resourceInputs(latest.assets()))) {
             progress.update(95, "资源未变化，复用已准备快照");
             return new Result(latest, false, false);
@@ -335,7 +342,8 @@ final class ReloadEngine implements AutoCloseable {
         if (!documents.containsKey(settings.defaultLayout())) throw new IllegalArgumentException("default-layout不存在");
         MenuOpeners.validate(settings.openers(), documents.keySet());
         progress.update(20, "扫描图像与CraftEngine资源");
-        var assets = new VanillaAssets(data.resolve("images"), settings.resourceRoot(), settings.craftEngineDefinitions());
+        var assets = new VanillaAssets(data.resolve("images"), settings.resourceRoot(), settings.craftEngineDefinitions(),
+            settings.resourceVersion());
         Map<Path, Stamp> initialResources = resourceInputs(assets);
         // 编译缓存仅活到本轮校验结束，最多保留64MiB像素。
         var renderer = new MenuRenderer(assets, 16_777_216);
@@ -345,7 +353,7 @@ final class ReloadEngine implements AutoCloseable {
             MenuTemplate.characters(documents.values()), settings.textScales(), settings.canvasScales(),
             settings.textColors(), step -> progress.update(24 + step * 48 / 85,
                 step < 55 ? "准备菜单图文" : "生成字形图集"), tasks,
-            !full && latest != null ? latest.fonts() : null, models);
+            !full && !versionChanged ? latest.fonts() : null, models);
         progress.update(72, fonts.reusedGlyphs() ? "字体依赖未变化，复用字形图集" : "字形图集生成完成");
         validate(catalog, renderer, fonts, settings, progress, 73, 80, tasks);
         assets.verifyInputs();

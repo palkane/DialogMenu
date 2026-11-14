@@ -1,4 +1,7 @@
 default-layout: layout-demo
+# 服务器统一资源目标版本；修改后执行 /dialogmenu reload all，不按玩家版本切换。
+# 支持 1.21.7/8/9/10/11、26.1/26.1.1/26.1.2、26.2、26.3。
+resource-version: '26.3'
 canvas-width: 300
 max-canvas-pixels: 1048576
 # 默认允许 Esc 关闭；单个菜单可用同名字段覆盖，不添加原生底部关闭按钮。

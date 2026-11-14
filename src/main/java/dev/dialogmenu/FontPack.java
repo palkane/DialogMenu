@@ -243,7 +243,7 @@ final class FontPack {
                 String alias = RegisteredImages.sourceKey(source);
                 imageSources.put(alias, new ImageRegistry.Entry(source, true));
             }
-        pack.registeredImages.prepare(imageSources, pack.rgba.indices(), pack.rgba.index(0xFFFFFF));
+        pack.registeredImages.prepare(imageSources, pack.rgba.indices(), pack.rgba.index(0xFFFFFF), renderer.assets.version());
         if (cached != null && pack.textFonts.equals(cached.textFonts)) {
             pack.text.putAll(cached.text);
             pack.reusedGlyphs = true;
@@ -628,7 +628,7 @@ final class FontPack {
         BuildTasks.ordered(tasks, writes, write -> write.apply(target),
             ignored -> progress.accept(++completed[0] * 100 / writes.size()));
         if (models != null) {
-            ModelPack.shaders(target);
+            models.shaders(target);
             if (!separateModels) models.write(target);
         }
         registeredImages.write(target);

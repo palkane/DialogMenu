@@ -4,7 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
-from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
+from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
 
 from model_catalog import Face, geometry, resource, visible_faces
 
@@ -47,8 +47,10 @@ def write_pack_changed(path, files):
         temporary = Path(stream.name)
     try:
         with ZipFile(temporary, "w", ZIP_DEFLATED) as archive:
-            for name, data in files.items():
-                archive.writestr(name, data)
+            for name, data in sorted(files.items()):
+                info = ZipInfo(name, (1980, 1, 1, 0, 0, 0))
+                info.compress_type = ZIP_DEFLATED
+                archive.writestr(info, data)
         temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)

@@ -29,6 +29,33 @@ void dialogmenu_rgba_transform(inout vec3 position, inout vec2 imageUv) {
     bool tagged = (payload & 0xE0000000u) == 0x20000000u;
     bool direct = (payload & 0xE0000000u) == 0xC0000000u;
     vec2 edge = step(vec2(0.5), fract(UV0 * vec2(textureSize(Sampler0, 0))));
+    if (all(equal(texel.rg, ivec2(29, 88))) && texel.b >= 149 && texel.b <= 152
+        && (proportionalTagged || hidden)) {
+        ivec2 atlas = textureSize(Sampler0, 0);
+        ivec2 pixel = ivec2(UV0 * atlas);
+        ivec2 stepPixel = ivec2(edge.x == 0.0 ? 1 : -1, 0);
+        ivec4 meta = ivec4(round(texelFetch(Sampler0, pixel + stepPixel, 0) * 255.0));
+        ivec4 tile = ivec4(round(texelFetch(Sampler0, pixel + stepPixel * 2, 0) * 255.0));
+        if (meta.b == 177) {
+            if (hidden) { dialogmenuMarked = 3; return; }
+            vec2 content = vec2(meta.rg + ivec2(1));
+            float height = float(((payload >> 11u) & 1023u) + 1u);
+            vec2 target = vec2(max(1.0, floor(height * content.x / content.y + 0.5)), height);
+            int top = int(payload & 2047u);
+            if (top >= 1024) top -= 2048;
+            vec2 tileOrigin = vec2(tile.rg) * target / content;
+            vec2 tileSize = vec2(tile.ba) * target / content;
+            position.xy += vec2(-1.0, float(top) - 8.0) + tileOrigin + edge * (tileSize - vec2(1.0));
+            vec2 origin = vec2(pixel) - edge * float(samplePixel.a) + vec2(3.0);
+            imageUv = (origin + edge * vec2(tile.ba)) / vec2(atlas);
+            dialogmenuImagePixels = vec4(origin, content / target) / vec4(vec2(atlas), vec2(atlas));
+            dialogmenuImageCoord = edge * tileSize;
+            vertexColor = vec4(dialogmenu_color(meta.a), 1.0);
+            dialogmenuMarked = 2;
+            dialogmenu_slice(float(top) + tileOrigin.y + edge.y * tileSize.y, int((payload >> 28u) & 1u));
+            return;
+        }
+    }
     if (all(equal(texel.rg, ivec2(29, 85))) && texel.b >= 149 && texel.b <= 152) {
         ivec2 pixel = ivec2(UV0 * textureSize(Sampler0, 0));
         ivec4 meta = ivec4(round(texelFetch(Sampler0, pixel + ivec2(edge.x == 0.0 ? 1 : -1, 0), 0) * 255.0));
@@ -189,7 +216,7 @@ void dialogmenu_transform(inout vec3 position, inout vec2 imageUv) {
     }
     ivec3 texel = ivec3(round(texelFetch(Sampler0, ivec2(UV0 * textureSize(Sampler0, 0)), 0).rgb * 255.0));
     bool native = (payload & 0xC0000000u) == 0xC0000000u;
-    bool markedResource = texel.r == 29 && texel.g >= 83 && texel.g <= 86
+    bool markedResource = texel.r == 29 && (texel.g >= 83 && texel.g <= 86 || texel.g == 88)
         && texel.b >= 149 && texel.b <= 152;
     if (native || markedResource) {
         float distance = centerX - position.x - (native ? 65536.0 : 0.0);

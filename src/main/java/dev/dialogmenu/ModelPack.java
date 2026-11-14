@@ -18,16 +18,19 @@ final class ModelPack {
     private final Map<String, String> packs;
     private final Map<String, double[]> bounds;
     private final Set<String> registered;
-    private static ModelPack defaultPack;
+    private final ResourceVersion version;
+    private LegacyModels legacy;
+    private static final Map<ResourceVersion, ModelPack> defaultPacks = new HashMap<>();
     private static final List<String> COMPILER = List.of("prepare.py", "model_catalog.py",
         "item_catalog.py", "model_cache.py", "corner_texture.py", "inventory/special-research/native-geometry.json");
 
     private ModelPack(Map<String, List<Face>> models, Map<String, String> packs, Map<String, double[]> bounds,
-                      Set<String> registered) {
+                      Set<String> registered, ResourceVersion version) {
         this.models = Map.copyOf(models);
         this.packs = Map.copyOf(packs);
         this.bounds = Map.copyOf(bounds);
         this.registered = Set.copyOf(registered);
+        this.version = version;
     }
 
     private static Set<String> ids(Collection<LayoutStore.Document> documents) {
@@ -36,12 +39,12 @@ final class ModelPack {
             if (node.type().equals("model")) ids.add(node.source());
         return ids;
     }
-    private static synchronized ModelPack defaults(Path root) throws IOException {
-        if (defaultPack != null) return defaultPack;
-        var library = new AssetLibrary(root);
+    private static synchronized ModelPack defaults(Path root, ResourceVersion version) throws IOException {
+        if (defaultPacks.containsKey(version)) return defaultPacks.get(version);
+        var library = new AssetLibrary(root, version);
         library.prepare(ignored -> {});
         InventoryAssets.prepare(library);
-        JsonObject data = InventoryAssets.json("models.json");
+        JsonObject data = InventoryAssets.json(version, "models.json");
         var models = new TreeMap<String, List<Face>>();
         var bounds = new TreeMap<String, double[]>();
         Gson gson = new Gson();
@@ -59,9 +62,11 @@ final class ModelPack {
             zip.finish();
             empty = bytes.toByteArray();
         }
-        defaultPack = new ModelPack(models, Map.of(
-            "vanilla", Base64.getEncoder().encodeToString(InventoryAssets.files().get("resourcepack.zip")),
-            "ce", Base64.getEncoder().encodeToString(empty)), bounds, models.keySet());
+        ModelPack defaultPack = new ModelPack(models, Map.of(
+            "vanilla", Base64.getEncoder().encodeToString(InventoryAssets.files(version).get("resourcepack.zip")),
+            "ce", Base64.getEncoder().encodeToString(empty)), bounds, models.keySet(), version);
+        defaultPack.prepareLegacy();
+        defaultPacks.put(version, defaultPack);
         return defaultPack;
     }
     static boolean matches(ModelPack pack, Collection<LayoutStore.Document> documents) {
@@ -70,7 +75,10 @@ final class ModelPack {
         return required.equals(pack == null ? Set.of() : pack.models.keySet());
     }
     static ModelPack prepare(Path data, Collection<LayoutStore.Document> documents) throws Exception {
-        ModelPack defaults = defaults(data);
+        return prepare(data, documents, ResourceVersion.DEFAULT);
+    }
+    static ModelPack prepare(Path data, Collection<LayoutStore.Document> documents, ResourceVersion version) throws Exception {
+        ModelPack defaults = defaults(data, version);
         Set<String> ids = ids(documents);
         SourceFiles inputs = new SourceFiles();
         Path unified = data.resolve("images/registry.json");
@@ -168,7 +176,22 @@ final class ModelPack {
                 Files.readAllBytes(root.resolve("prepared/" + kind + "/resourcepack.zip"))));
         packs.put("vanilla", defaults.packs.get("vanilla"));
         inputs.verify();
-        return new ModelPack(faces, packs, bounds, registered);
+        ModelPack result = new ModelPack(faces, packs, bounds, registered, version);
+        result.prepareLegacy();
+        return result;
+    }
+
+    private void prepareLegacy() throws IOException {
+        if (!version.bitmap()) return;
+        Map<String, byte[]> files = new TreeMap<>(InventoryAssets.files(version));
+        for (String value : packs.values())
+            try (var zip = new ZipInputStream(new ByteArrayInputStream(Base64.getDecoder().decode(value)))) {
+                for (ZipEntry entry; (entry = zip.getNextEntry()) != null;)
+                    if (!entry.isDirectory()) files.put(entry.getName(), zip.readAllBytes());
+            }
+        Set<String> sprites = new TreeSet<>();
+        for (var faces : models.values()) for (Face face : faces) sprites.add(face.sprite());
+        legacy = new LegacyModels(sprites, files);
     }
 
     java.awt.Rectangle area(Menu menu, Node node, int width, int height) {
@@ -205,7 +228,7 @@ final class ModelPack {
     }
     List<Path> paths(Path data) throws IOException {
         // 26.2 的完整字体快照已经包含模型资源，不再向合包方暴露原始世界图集。
-        if (InventoryAssets.usesItemsAtlas()) return List.of();
+        if (version.bitmap() || version.itemsAtlas()) return List.of();
         List<Path> result = new ArrayList<>();
         for (String kind : List.of("vanilla", "ce")) {
             byte[] bytes = Base64.getDecoder().decode(packs.get(kind));
@@ -233,7 +256,8 @@ final class ModelPack {
                 for (ZipEntry entry; (entry = input.getNextEntry()) != null;) {
                     if (entry.getName().equals("pack.mcmeta") || entry.isDirectory()) continue;
                     // items-only 协议不导出原始世界图集，避免覆盖客户端或其他资源包的规则。
-                    if (InventoryAssets.usesItemsAtlas() && entry.getName().contains("/atlases/")
+                    if (version.bitmap() && entry.getName().contains("/atlases/")) continue;
+                    if (version.itemsAtlas() && entry.getName().contains("/atlases/")
                             && !entry.getName().equals("assets/minecraft/atlases/items.json")) continue;
                     Path path = target.resolve(entry.getName()).normalize();
                     if (!path.startsWith(target.normalize())) throw new IOException("Invalid model pack entry");
@@ -250,7 +274,8 @@ final class ModelPack {
                     Files.write(path, bytes);
                 }
             }
-        if (InventoryAssets.usesItemsAtlas()) writeItemSprites(target);
+        if (version.bitmap()) legacy.write(target);
+        else if (version.itemsAtlas()) writeItemSprites(target);
     }
     private void writeItemSprites(Path target) throws IOException {
         Path path = target.resolve("assets/minecraft/atlases/items.json");
@@ -261,15 +286,15 @@ final class ModelPack {
         for (var faces : models.values()) for (Face face : faces) sprites.add(face.sprite());
         for (String sprite : sprites) {
             String resource = sprite;
-            if (MISSING_26_2.contains(sprite)) {
+            if (version.equals(ResourceVersion.DEFAULT) && MISSING_26_2.contains(sprite)) {
                 String input = texturePath(sprite);
                 resource = itemTexture(sprite);
                 Path destination = target.resolve(texturePath(resource));
-                byte[] bytes = InventoryAssets.files().get(input);
+                byte[] bytes = InventoryAssets.files(version).get(input);
                 if (bytes == null) throw new IOException("Missing prepared model texture: " + sprite);
                 Files.createDirectories(destination.getParent());
                 Files.write(destination, bytes);
-                byte[] metadata = InventoryAssets.files().get(input + ".mcmeta");
+                byte[] metadata = InventoryAssets.files(version).get(input + ".mcmeta");
                 if (metadata != null) Files.write(destination.resolveSibling(destination.getFileName() + ".mcmeta"), metadata);
             }
             JsonObject entry = new JsonObject();
@@ -293,14 +318,20 @@ final class ModelPack {
             shift.addProperty("font", "dialogmenu:space");
             parts.add(shift);
             JsonObject part = new JsonObject();
-            part.addProperty("type", "object");
-            part.addProperty("atlas", face.atlas());
-            part.addProperty("sprite", InventoryAssets.usesItemsAtlas() ? itemSprite(face.sprite()) : face.sprite());
+            LegacyModels.Glyph bitmap = version.bitmap() ? legacy.glyph(face.sprite()) : null;
+            if (bitmap == null) {
+                part.addProperty("type", "object");
+                part.addProperty("atlas", face.atlas());
+                part.addProperty("sprite", version.itemsAtlas() ? itemSprite(face.sprite()) : face.sprite());
+            } else {
+                part.addProperty("text", Character.toString(bitmap.code()));
+                part.addProperty("font", "dialogmenu:model_bitmap");
+            }
             part.addProperty("color", "#beef01");
-            part.addProperty("shadow_color", payload);
+            part.addProperty("shadow_color", payload | (bitmap == null ? 0 : bitmap.descriptor() << 21));
             parts.add(part);
             JsonObject reset = new JsonObject();
-            reset.addProperty("text", faceMove(face.face(), true) + SpriteCanvas.move(-8));
+            reset.addProperty("text", faceMove(face.face(), true) + SpriteCanvas.move(bitmap == null ? -8 : -bitmap.advance()));
             reset.addProperty("font", "dialogmenu:space");
             parts.add(reset);
         }
@@ -310,7 +341,7 @@ final class ModelPack {
         // The old Paper API remains the compile baseline; the installed Adventure must support objects.
         Component result = GsonComponentSerializer.gson().deserialize(json.toString());
         String encoded = GsonComponentSerializer.gson().serialize(result);
-        if (!encoded.contains("\"sprite\""))
+        if (!version.bitmap() && !encoded.contains("\"sprite\""))
             throw new IllegalStateException("model需要支持sprite组件的Minecraft/Adventure（26.2及以上）");
         return result;
     }
@@ -329,7 +360,7 @@ final class ModelPack {
             spaces.put(Character.toString(0xF1000 + bit + 14), 2000 << bit);
         }
     }
-    static void shaders(Path target) throws IOException {
+    void shaders(Path target) throws IOException {
         Path vertexPath = target.resolve("dialogmenu_26_3/assets/minecraft/shaders/core/text.vsh");
         String vertex = Files.readString(vertexPath)
             .replace("void main() {", "#ifdef IS_GUI\n#include <dialogmenu_vanilla:models.glsl>\n"
@@ -365,5 +396,30 @@ final class ModelPack {
             .replace("void main() {", "#ifdef IS_GUI\nflat in float dialogmenuModelVisible;\n#endif\n\nvoid main() {")
             .replace("    vec2 uv = texCoord0;", "#ifdef IS_GUI\n    if (dialogmenuModelVisible < 0.5) discard;\n#endif\n    vec2 uv = texCoord0;");
         Files.writeString(fragment26Path, fragment26);
+        for (String overlay : List.of("", "dialogmenu_330", "dialogmenu_lightmap")) {
+            Path root = target.resolve(overlay).resolve("assets/minecraft/shaders/core");
+            Path legacyVertex = root.resolve("rendertype_text.vsh");
+            String imports = "#moj_import <dialogmenu_vanilla:models.glsl>\n"
+                + "#moj_import <dialogmenu_ce:models.glsl>\n";
+            if (version.bitmap()) imports += "#define DIALOGMENU_BITMAP_MODELS\n"
+                + "#moj_import <minecraft:globals.glsl>\n#moj_import <dialogmenu:model_bitmap_data.glsl>\n";
+            imports += "#moj_import <dialogmenu:model_vertex_legacy.glsl>\n\n";
+            Files.writeString(legacyVertex, Files.readString(legacyVertex)
+                .replace("void main() {", imports + "void main() {")
+                .replace("    dialogmenu_finish_native(position);",
+                    "    dialogmenuModelAnimation = vec3(0.0);\n"
+                    + "    if (ProjMat[3][3] == 1.0) dialogmenu_model_legacy(position, imageUv);\n"
+                    + "    dialogmenu_finish_native(position);"));
+            Path legacyFragment = root.resolve("rendertype_text.fsh");
+            Files.writeString(legacyFragment, Files.readString(legacyFragment)
+                .replace("void main() {", "flat in vec3 dialogmenuModelAnimation;\n\nvoid main() {")
+                .replace("    if (dialogmenuMarked == 1)", "    if (dialogmenuModelAnimation.z > 0.0)\n"
+                    + "        texColor.rgb = mix(texColor.rgb, texture(Sampler0, dialogmenu_uv() + dialogmenuModelAnimation.xy).rgb,"
+                    + " dialogmenuModelAnimation.z);\n    if (dialogmenuMarked == 1)"));
+        }
+        try (var input = ModelPack.class.getResourceAsStream("/rgba/model_vertex_legacy.glsl")) {
+            if (input == null) throw new IOException("Missing legacy model shader");
+            Files.write(target.resolve("assets/dialogmenu/shaders/include/model_vertex_legacy.glsl"), input.readAllBytes());
+        }
     }
 }

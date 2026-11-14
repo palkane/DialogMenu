@@ -21,14 +21,24 @@ final class AssetLibrary {
     private final boolean embedded;
     private final Duration timeout;
     private final List<Asset> assets;
+    private final ResourceVersion target;
 
     AssetLibrary(Path data) throws IOException {
-        this(data, null, true, Duration.ofSeconds(45));
+        this(data, ResourceVersion.DEFAULT);
+    }
+
+    AssetLibrary(Path data, ResourceVersion target) throws IOException {
+        this(data, target, null, true, Duration.ofSeconds(45));
     }
 
     AssetLibrary(Path data, URI base, boolean embedded, Duration timeout) throws IOException {
+        this(data, ResourceVersion.DEFAULT, base, embedded, timeout);
+    }
+
+    AssetLibrary(Path data, ResourceVersion target, URI base, boolean embedded, Duration timeout) throws IOException {
+        this.target = target;
         var properties = new Properties();
-        try (var input = AssetLibrary.class.getResourceAsStream("/vanilla-assets.properties")) {
+        try (var input = AssetLibrary.class.getResourceAsStream(target.manifest())) {
             if (input == null) throw new IOException("Missing vanilla asset manifest");
             properties.load(input);
         }
@@ -51,6 +61,7 @@ final class AssetLibrary {
     }
 
     List<Path> paths() { return assets.stream().map(asset -> directory.resolve(asset.name())).toList(); }
+    ResourceVersion target() { return target; }
 
     void prepare(Consumer<String> progress) throws IOException {
         interrupted();
@@ -66,7 +77,9 @@ final class AssetLibrary {
                 Path temporary = Files.createTempFile(directory, ".download-", ".tmp");
                 try {
                     // Present only in development/test classpaths, not the slim plugin JAR.
-                    try (var bundled = embedded ? AssetLibrary.class.getResourceAsStream("/" + asset.name()) : null) {
+                    String bundledPath = target.equals(ResourceVersion.DEFAULT) ? "/" + asset.name()
+                        : "/vanilla-assets/" + target.id() + "/" + asset.name();
+                    try (var bundled = embedded ? AssetLibrary.class.getResourceAsStream(bundledPath) : null) {
                         if (bundled != null) {
                             Files.copy(bundled, temporary, StandardCopyOption.REPLACE_EXISTING);
                         } else {
@@ -174,8 +187,9 @@ final class AssetLibrary {
         }
     }
 
-    private static HttpResponse.BodySubscriber<Path> bounded(Path file, long limit) {
-        var target = HttpResponse.BodySubscribers.ofFile(file);
+    static HttpResponse.BodySubscriber<Path> bounded(Path file, long limit) {
+        // prepare owns creation. A late onSubscribe after cancellation must not recreate its deleted file.
+        var target = HttpResponse.BodySubscribers.ofFile(file, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING);
         return new HttpResponse.BodySubscriber<>() {
             private Flow.Subscription subscription;
             private long received;

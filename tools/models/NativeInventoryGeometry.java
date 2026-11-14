@@ -45,6 +45,17 @@ public final class NativeInventoryGeometry {
     public static void main(String[] args) throws Exception {
         var root = new JsonParser().parse(Files.readString(Path.of(args[0]))).getAsJsonObject();
         var models = root.getAsJsonObject("models");
+        if (args.length == 3 && args[2].equals("beds")) {
+            // Run against 26.1, before beds moved to JSON block models.
+            var renderer = Class.forName("net.minecraft.client.renderer.blockentity.BedRenderer");
+            for (String part : List.of("head", "foot")) {
+                String method = part.equals("head") ? "createHeadLayer" : "createFootLayer";
+                var layer = (LayerDefinition) renderer.getMethod(method).invoke(null);
+                models.add("bed_" + part, export(layer.bakeRoot()));
+            }
+            Files.writeString(Path.of(args[1]), new GsonBuilder().setPrettyPrinting().create().toJson(root));
+            return;
+        }
         var skull = new SkullModel(SkullModel.createMobHeadLayer().bakeRoot());
         skull.setupAnim(new SkullModelBase.State());
         models.add("skull", export(skull.root()));

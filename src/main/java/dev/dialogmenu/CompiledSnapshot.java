@@ -44,7 +44,9 @@ final class CompiledSnapshot {
                     "SpriteCanvas.class", "PreparedLayouts.class", "NativeInk.class", "NativeControls.class",
                     "LayoutStore.class", "MenuTemplate.class", "ModelPack.class",
                     "VanillaAssets.class", "CraftEngineAssets.class", "AssetLibrary.class",
-                    "InventoryAssets.class", "/rgba/characters-3500.txt")) {
+                    "InventoryAssets.class", "ResourceVersion.class", "BitmapAtlas.class",
+                    "LegacyImages.class", "LegacyModels.class", "/rgba/model_vertex_legacy.glsl",
+                    "/rgba/vertex.glsl", "/rgba/characters-3500.txt")) {
                     try (var input = CompiledSnapshot.class.getResourceAsStream(name)) {
                         if (input == null) throw new IOException("缺少缓存兼容性标识：" + name);
                         input.transferTo(bytes);
@@ -54,6 +56,13 @@ final class CompiledSnapshot {
             try (var manifest = CompiledSnapshot.class.getResourceAsStream("/vanilla-assets.properties")) {
                 if (manifest == null) throw new IOException("缺少原版资源库版本标识");
                 manifest.transferTo(bytes);
+            }
+            for (String version : ResourceVersion.SUPPORTED) {
+                if (version.equals(ResourceVersion.DEFAULT.id())) continue;
+                try (var manifest = CompiledSnapshot.class.getResourceAsStream(new ResourceVersion(version).manifest())) {
+                    if (manifest == null) throw new IOException("Missing vanilla asset manifest: " + version);
+                    manifest.transferTo(bytes);
+                }
             }
             engine = SourceFiles.digest(bytes.toByteArray());
         } catch (java.net.URISyntaxException error) { throw new IOException(error); }

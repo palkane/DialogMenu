@@ -135,3 +135,18 @@ tasks.register('benchmarkClasspath') {
         destination.text = sourceSets.benchmark.runtimeClasspath.asPath
     }
 }
+
+tasks.register('versionedResourceTest', JavaExec) {
+    group = 'verification'
+    description = 'Verify generated local version libraries through export, reload and snapshot restore.'
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'dev.dialogmenu.VersionedResourceTests'
+    systemProperty 'java.awt.headless', 'true'
+    doFirst {
+        String libraries = System.getenv('DIALOGMENU_VERSIONED_LIBRARIES')
+        if (!libraries) throw new GradleException('Set DIALOGMENU_VERSIONED_LIBRARIES to tools/versioned_assets.py output')
+        args libraries, layout.buildDirectory.dir('versioned-resources').get().asFile.absolutePath
+        args providers.gradleProperty('resourceTestVersions').getOrElse('1.21.7 1.21.8 26.2 26.3').split(' ')
+    }
+}

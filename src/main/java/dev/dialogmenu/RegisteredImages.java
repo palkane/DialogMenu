@@ -15,6 +15,8 @@ final class RegisteredImages {
     private final Map<String, Alias> aliases = new TreeMap<>();
     private final Map<String, Entry> entries = new LinkedHashMap<>();
     private int whiteTint;
+    private ResourceVersion version = ResourceVersion.DEFAULT;
+    private LegacyImages legacy;
 
     // 菜单复用原图的像素，但必须隔离精灵名；否则 items 图集会抢占世界方块同名精灵。
     static String nativeSpriteId(String resource) {
@@ -28,8 +30,14 @@ final class RegisteredImages {
     static String sourceKey(BufferedImage image) { return ImageRegistry.PREFIX + "~" + FontPack.hash(image); }
 
     void prepare(Map<String, ImageRegistry.Entry> images, Collection<Integer> tints, int whiteTint) throws IOException {
+        prepare(images, tints, whiteTint, ResourceVersion.DEFAULT);
+    }
+
+    void prepare(Map<String, ImageRegistry.Entry> images, Collection<Integer> tints, int whiteTint,
+                 ResourceVersion version) throws IOException {
+        this.version = version;
         this.whiteTint = whiteTint;
-        Map<String, String> nativeSprites = InventoryAssets.nativeSprites();
+        Map<String, String> nativeSprites = InventoryAssets.nativeSprites(version);
         for (var image : new TreeMap<>(images).entrySet()) {
             String hash = FontPack.hash(image.getValue().image());
             aliases.put(image.getKey(), new Alias(hash, image.getValue().tintable()));
@@ -37,12 +45,16 @@ final class RegisteredImages {
                 String nativeSprite = tint == whiteTint ? nativeSprites.get(image.getKey()) : null;
                 if (image.getValue().image().getWidth() != image.getValue().image().getHeight())
                     nativeSprite = null;
-                if (nativeSprite != null && !hash.equals(FontPack.hash(InventoryAssets.images().get(image.getKey()).image())))
+                if (nativeSprite != null && !hash.equals(FontPack.hash(InventoryAssets.images(version).get(image.getKey()).image())))
                     nativeSprite = null;
                 String sprite = nativeSprite;
                 entries.computeIfAbsent(hash + ":" + tint,
                     key -> new Entry(sprite != null ? sprite : "dialogmenu:registered/" + hash + "_" + tint,
                         image.getValue().image(), tint, sprite != null));
+                if (version.bitmap()) {
+                    if (legacy == null) legacy = new LegacyImages();
+                    legacy.prepare(hash + ":" + tint, image.getValue().image(), tint);
+                }
             }
         }
     }
@@ -58,9 +70,11 @@ final class RegisteredImages {
         Entry entry = registered == null ? null
             : entries.get(registered.hash() + ":" + (registered.tintable() ? tint : whiteTint));
         if (entry == null) throw new IllegalArgumentException("未准备注册材质或颜色：" + alias + "；请执行 /dialogmenu reload all");
+        if (version.bitmap()) return legacy.component(
+            registered.hash() + ":" + (registered.tintable() ? tint : whiteTint), height, localY, band);
         JsonObject object = new JsonObject();
         object.addProperty("type", "object");
-        object.addProperty("atlas", "minecraft:items");
+        object.addProperty("atlas", "minecraft:" + version.imageAtlas());
         object.addProperty("sprite", spriteId(entry));
         object.addProperty("color", "#beef01");
         int payload = RgbaImages.imagePayload(height, localY, band);
@@ -94,7 +108,11 @@ final class RegisteredImages {
     }
 
     void write(Path pack) throws IOException {
-        Path atlas = pack.resolve("assets/minecraft/atlases/items.json");
+        if (version.bitmap()) {
+            if (legacy != null) legacy.write(pack);
+            return;
+        }
+        Path atlas = pack.resolve("assets/minecraft/atlases/" + version.imageAtlas() + ".json");
         if (entries.isEmpty() && !Files.isRegularFile(atlas)) return;
         JsonObject definition = Files.isRegularFile(atlas)
             ? JsonParser.parseString(Files.readString(atlas)).getAsJsonObject() : new JsonObject();
@@ -124,7 +142,7 @@ final class RegisteredImages {
         definition.add("sources", sources);
         Files.createDirectories(atlas.getParent());
         Files.writeString(atlas, new Gson().toJson(definition) + "\n");
-        write26_2Fallbacks(pack, definition);
+        if (version.equals(ResourceVersion.DEFAULT)) write26_2Fallbacks(pack, definition);
     }
     /** 26.2 中不存在的新版本图标使用内置像素，已有原版图标继续复用客户端材质。 */
     private void write26_2Fallbacks(Path pack, JsonObject definition) throws IOException {

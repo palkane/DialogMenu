@@ -348,11 +348,29 @@ class Catalog:
             namespace, texture = resource(spec["texture"]).split(":", 1)
             folder = "chest" if kind == "chest" else "shulker"
             faces = self.native_faces(kind, atlas, f"{namespace}:entity/{folder}/{texture}")
+        elif kind == "bed":
+            namespace, texture = resource(spec["texture"]).split(":", 1)
+            sprite = f"{namespace}:entity/bed/{texture}"
+            part = spec.get("part")
+            if part is not None:
+                if part not in ("head", "foot"):
+                    raise Unsupported("Unknown bed part: " + str(part))
+                faces = self.native_faces("bed_" + part, "minecraft:beds", sprite)
+            else:
+                # Before 26.1 the special renderer, not the item JSON, placed both halves.
+                faces = []
+                for half, offset in (("head", 0), ("foot", -1)):
+                    for face in self.native_faces("bed_" + half, "minecraft:beds", sprite):
+                        points = tuple((-p[0], -0.4375 - p[2], offset - p[1])
+                                       for p in face.points)
+                        faces.append(replace(face, points=points))
         elif kind == "banner":
             atlas = "minecraft:banner_patterns"
             color = self.native_models()["dyes"][spec["color"]]
             tint = tuple(((color >> shift) & 255) / 255 for shift in (16, 8, 0))
             base = "minecraft:entity/banner/banner_base"
+            if not self.exists(path_for(base, "textures", ".png")):
+                base = "minecraft:entity/banner_base"
             faces = self.native_faces("banner_stand", atlas, base)
             faces += self.native_faces("banner_flag", atlas, base)
             faces += self.native_faces("banner_flag", atlas, "minecraft:entity/banner/base", tint)
@@ -378,7 +396,10 @@ class Catalog:
             faces += self.native_faces("pot_sides", "minecraft:decorated_pot",
                                        "minecraft:entity/decorated_pot/decorated_pot_side")
         elif kind == "shield":
-            faces = self.native_faces("shield", "minecraft:blocks", "minecraft:entity/shield/shield_base_nopattern")
+            sprite = "minecraft:entity/shield/shield_base_nopattern"
+            if not self.exists(path_for(sprite, "textures", ".png")):
+                sprite = "minecraft:entity/shield_base_nopattern"
+            faces = self.native_faces("shield", "minecraft:blocks", sprite)
         else:
             raise Unsupported("special renderer: " + spec["type"])
         return item_transform(faces, node["_transforms"])

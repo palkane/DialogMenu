@@ -134,9 +134,9 @@ def build(output, cache):
         library = {**images, **preview, **{k: v for k, v in files.items() if k.startswith("assets/")},
                    **{path: bytes.fromhex(content) for value in models.values()
                       for path, content in value["assets"].items()},
-                   "catalog.json": json.dumps(catalog, separators=(",", ":")).encode(),
-                   "models.json": json.dumps({"models": faces, "bounds": bounds}, separators=(",", ":")).encode(),
-                   "state.json": json.dumps(state, separators=(",", ":")).encode(),
+                   "catalog.json": json.dumps(catalog, separators=(",", ":"), sort_keys=True).encode(),
+                   "models.json": json.dumps({"models": faces, "bounds": bounds}, separators=(",", ":"), sort_keys=True).encode(),
+                   "state.json": json.dumps(state, separators=(",", ":"), sort_keys=True).encode(),
                    "resourcepack.zip": model_file.read_bytes()}
         write_pack_changed(output, library)
         report = {"total": len(catalog), "models": len(models), "images": len(images),

@@ -25,6 +25,20 @@ public final class AssetLibraryTests {
 
     static int run(Path root) throws Exception {
         Path data = Files.createTempDirectory(root, "asset-download-");
+        Path cancelledFile = Files.createTempFile(data, "late-subscription-", ".tmp");
+        var late = AssetLibrary.bounded(cancelledFile, 1);
+        Files.delete(cancelledFile);
+        var cancelledSubscription = new AtomicBoolean();
+        late.onSubscribe(new Flow.Subscription() {
+            public void request(long count) {}
+            public void cancel() { cancelledSubscription.set(true); }
+        });
+        check(cancelledSubscription.get() && !Files.exists(cancelledFile),
+            "A response subscribed after cleanup must not recreate the cancelled temporary file");
+        try {
+            late.getBody().toCompletableFuture().join();
+            throw new AssertionError("Late subscription completed despite deleted destination");
+        } catch (CompletionException expected) { checks++; }
         var fixtures = new HashMap<String, byte[]>();
         for (String name : NAMES) try (var input = AssetLibraryTests.class.getResourceAsStream("/" + name)) {
             fixtures.put(name, Objects.requireNonNull(input).readAllBytes());

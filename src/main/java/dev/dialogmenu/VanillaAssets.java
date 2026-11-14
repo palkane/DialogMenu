@@ -22,15 +22,17 @@ final class VanillaAssets {
     private final SourceFiles inputs = new SourceFiles();
     private final AssetLibrary library;
     final CraftEngineAssets craftEngine;
-    record State(Map<String, BufferedImage> custom, JsonElement craftEngine, Map<String, ImageRegistry.Entry> registered) {}
+    record State(Map<String, BufferedImage> custom, JsonElement craftEngine,
+                 Map<String, ImageRegistry.Entry> registered, ResourceVersion version) {}
 
     synchronized State state(Gson codec) {
         synchronized (craftEngine) {
-            return new State(new HashMap<>(custom), codec.toJsonTree(craftEngine), new TreeMap<>(registered));
+            return new State(new HashMap<>(custom), codec.toJsonTree(craftEngine), new TreeMap<>(registered), version());
         }
     }
     static VanillaAssets restore(Path images, State state, Gson codec) throws IOException {
-        VanillaAssets assets = new VanillaAssets(images, codec.fromJson(state.craftEngine(), CraftEngineAssets.class));
+        VanillaAssets assets = new VanillaAssets(images, codec.fromJson(state.craftEngine(), CraftEngineAssets.class),
+            state.version());
         assets.custom.putAll(state.custom());
         assets.registered.putAll(state.registered());
         return assets;
@@ -45,16 +47,20 @@ final class VanillaAssets {
     }
 
     VanillaAssets(Path images, Path craftEngineResources, List<String> definitions) throws IOException {
-        this(images, new CraftEngineAssets(craftEngineResources, definitions));
-        registered.putAll(InventoryAssets.images());
+        this(images, craftEngineResources, definitions, ResourceVersion.DEFAULT);
+    }
+
+    VanillaAssets(Path images, Path craftEngineResources, List<String> definitions, ResourceVersion version) throws IOException {
+        this(images, new CraftEngineAssets(craftEngineResources, definitions), version);
+        registered.putAll(InventoryAssets.images(version));
         registered.putAll(ImageRegistry.load(this.images, craftEngine, inputs));
     }
 
-    private VanillaAssets(Path images, CraftEngineAssets craftEngine) throws IOException {
+    private VanillaAssets(Path images, CraftEngineAssets craftEngine, ResourceVersion version) throws IOException {
         this.images = images.toAbsolutePath().normalize();
         Files.createDirectories(this.images);
         this.craftEngine = craftEngine;
-        library = new AssetLibrary(this.images.getParent());
+        library = new AssetLibrary(this.images.getParent(), version);
         library.prepare(ignored -> {});
         InventoryAssets.prepare(library);
         byte[] source = library.read("glyphs.bin.gz");
@@ -143,6 +149,7 @@ final class VanillaAssets {
     }
 
     List<Path> libraryPaths() { return library.paths(); }
+    ResourceVersion version() { return library.target(); }
     void verifyInputs() throws IOException { library.verify(); inputs.verify(); craftEngine.verifyInputs(); }
 
     List<String> sources() throws IOException {
