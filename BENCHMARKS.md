@@ -37,11 +37,29 @@ gradle benchmark '-PbenchmarkArgs=dev.dialogmenu.*Benchmark -f 1 -wi 1 -i 1 -w 1
 | --- | --- | --- |
 | Pipeline | 12 / 48 image-and-text items; YAML parse, warm render, warm encode, JSON serialize, opening pipeline, changing text | The first four isolate stages. Opening and refresh use the snapshot presentation cache and include click-token creation and JSON serialization. Opening uses a new canvas cache with resources already prepared. |
 | Sessions | 12 / 60 rows; 1 / 50 active synthetic players | One player's atomic initial-list bind, separate bind-and-populate, value update, collection replacement or form completion, including the real session/template/render/encode/JSON path. Players are serviced serially, like the server main thread; this is not 50 concurrent Bukkit threads. |
+| Clicks | 12 / 48 image-and-text items and list rows; 1 / 50 active synthetic players | Consume a rendered button's actual custom-click token, validate its target, execute navigation/state/callback actions, rebuild the session page, freeze values, render, encode fresh click tokens and serialize JSON. Six operations are detailed below. |
 | Text | 32 / 512 input characters | Styled mixed CJK/Latin text parsing and glyph extraction. |
 | Resources | 1 / 13 layouts; 1 / 4 resource workers | Cold engine/directory compilation, unchanged cache lookup, persisted snapshot restore, and changed YAML reload. |
 | Native controls | 2 / 12 text/slider fields | Parsing existing configuration and validating a synthetic submission. |
 
-The full default matrix has 48 parameterized cases. Session `bindInitialCollection` supplies the initial rows atomically and measures one complete presentation. `bindAndPopulate` uses a separate bind and update, measuring both presentations. `formSubmit` measures session validation and the return to the menu. Constructing a live Paper dialog/input screen requires the server's registry provider and is outside this offline suite; no fake provider substitutes for its cost.
+The full default matrix has 72 parameterized cases, including 24 click cases. Session `bindInitialCollection` supplies the initial rows atomically and measures one complete presentation. `bindAndPopulate` uses a separate bind and update, measuring both presentations. `formSubmit` measures session validation and the return to the menu. Constructing a live Paper dialog/input screen requires the server's registry provider and is outside this offline suite; no fake provider substitutes for its cost.
+
+### Click-to-page workloads
+
+| Method | Work per timed operation |
+| --- | --- |
+| `clickOpenPage` | One click navigates between two pages with prepared presentation caches. Both pages contain the requested image/text items; the dashboard also shows that many list rows. Repeated operations alternate direction, including the plugin's bounded history-copy cost. |
+| `clickOpenUncachedPage` | The same navigation after replacing the page-frame, static-fragment and canvas caches inside the timed operation. Includes cache-object allocation. Parsed YAML, assets, glyphs and renderer caches remain ready; this is not a cold resource-pack build. |
+| `clickOpenAndBack` | Open the detail page, then click Back to restore the dashboard. **Two clicks and two page constructions per operation**; reported latency/allocation is for the whole round trip. |
+| `clickRefreshState` | Click a button to toggle real session state and rebuild the current page with changed text. |
+| `clickNextListPage` | Click a callback button, replace the external collection with a distinct next/previous set and build one updated dashboard. Includes collection validation and binding checks. |
+| `clickEntryAndBack` | Click an actual list row, validate the entry, invoke its callback, set the selected ID and open details, then click Back. **Two clicks and two page constructions per operation**. |
+
+`ClickFixtures` uses production `ActionTokens`, `ClickGestures.Target`, `MenuSessions`, value freezing and rendering/serialization. Its small synchronous host implements only the listed action routes; it does not run Bukkit event dispatch, `DialogMenuPlugin`'s complete router, asynchronous scheduling, double-click waiting or Paper dialog construction. Thus these scores measure offline click-to-component work, not wall-clock mouse-to-screen latency. Players act serially and each operation consumes one player's latest token. No manual sleep is timed.
+
+The fixture smoke checks that tokens exist in the actual serialized component, foreign-player and stale-page tokens are rejected, state and list contents change, open/back history is restored, and each callback produces exactly the intended number of pages. Fonts/assets and initial pages are built outside measurement. Both cached pages are visited during trial setup; every timed operation still creates and consumes fresh page tokens.
+
+Run just the click matrix with `gradle benchmark '-PbenchmarkArgs=dev.dialogmenu.ClickBenchmark'`. Use `-p items=48 -p activePlayers=1` in the JMH arguments to select one workload size; 50 active players remains a serial rotation, not concurrent clicks.
 
 Resource `coldBuild`, `restoreDiskCache` and `reloadYaml` use single-shot timing, two warm-up and five measured invocations per fork. Cold input files are created outside the timed method; each invocation uses a new directory and engine. It measures real resource preparation, validation, ZIP output and snapshot persistence. It does **not** flush the operating-system file cache, restart the JVM for each invocation, or download files. Required vanilla assets are placed on the benchmark classpath and validated before execution. Thus this is a compilation-cold benchmark with warm JVM/OS caches, not first-install HTTP latency. Restore includes creation of a new engine and reading/decoding its persisted snapshot. Changed YAML reload includes writing the changed source file. Unchanged lookup uses sampled steady-state timing.
 
