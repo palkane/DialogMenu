@@ -75,24 +75,13 @@ final class MenuExpansion implements UnaryOperator<String> {
             }
             return text;
         }
-        // Replace in declaration order, not text order. A value may introduce a later token,
-        // including one assembled from surrounding braces, so rescan after each substitution.
-        for (int first = 0; first < before;) {
-            Variable next = null;
-            int start = -1;
-            for (int i = 0; i < text.length(); i++) {
-                char c = text.charAt(i);
-                if (c == '{') start = i + 1;
-                else if (c == '}' && start >= 0) {
-                    Variable v = plan.named.get(text.substring(start, i));
-                    if (v != null && v.index >= first && v.index < before && !base.containsKey(v.name)
-                        && (next == null || v.index < next.index)) next = v;
-                    start = -1;
-                }
-            }
-            if (next == null) break;
-            text = text.replace(next.token, value(next.name, before));
-            first = next.index + 1;
+        // Declaration order is already encoded in Plan.ordered. Checking each token directly
+        // preserves nested substitutions without rescanning the whole text and allocating
+        // substrings for every brace pair.
+        for (int i = 0; i < before; i++) {
+            Variable variable = plan.ordered.get(i);
+            if (base.containsKey(variable.name) || text.indexOf(variable.token) < 0) continue;
+            text = text.replace(variable.token, value(variable.name, before));
         }
         return text;
     }

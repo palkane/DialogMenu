@@ -1,6 +1,5 @@
 package dev.dialogmenu;
 
-import com.destroystokyo.paper.event.server.ServerTickEndEvent;
 import io.papermc.paper.connection.PlayerGameConnection;
 import io.papermc.paper.dialog.Dialog;
 import io.papermc.paper.dialog.DialogResponseView;
@@ -42,12 +41,6 @@ import static dev.dialogmenu.DialogMenuClosedEvent.Reason;
 
 public final class DialogMenuPlugin extends JavaPlugin implements Listener, TabExecutor, MenuSessions.Host {
     private LayoutStore store;
-    private final ExecutorService presentationWorker = Executors.newSingleThreadExecutor(task -> {
-        Thread thread = new Thread(task, "DialogMenu-present");
-        thread.setDaemon(true);
-        return thread;
-    });
-    private final LatestTasks<UUID> pendingPresentations = new LatestTasks<>(presentationWorker);
     private final ExecutorService previewWorker = Executors.newSingleThreadExecutor(task -> {
         Thread thread = new Thread(task, "DialogMenu-preview");
         thread.setDaemon(true);
@@ -55,12 +48,9 @@ public final class DialogMenuPlugin extends JavaPlugin implements Listener, TabE
     });
     private record PresentationCache(MenuRenderer renderer, SpriteCanvas canvas) {}
     private final Map<MenuRenderer, PresentationCache> presentationCaches = new WeakHashMap<>();
-    private final Map<MenuRenderer, PresentationCache> immediateCaches = new WeakHashMap<>();
     private final Map<MenuRenderer, PresentationCache> previewCaches = new WeakHashMap<>();
-    private final Map<UUID, Integer> presentationTicks = new HashMap<>();
-    private final ConcurrentMap<UUID, Runnable> readyPresentations = new ConcurrentHashMap<>();
-    private final AtomicLong presentationSequence = new AtomicLong();
-    private final ConcurrentMap<UUID, Long> presentationRequests = new ConcurrentHashMap<>();
+    private long presentationSequence;
+    private final Map<UUID, Long> presentationRequests = new HashMap<>();
     private MenuSessions application;
     private ReloadEngine reloadEngine;
     private EditorBridge editor;
@@ -167,8 +157,6 @@ public final class DialogMenuPlugin extends JavaPlugin implements Listener, TabE
     }
     public void showForm(Player player, MenuTemplate.FormSpec form, Consumer<Map<String, String>> submitted, Runnable cancelled) {
         presentationRequests.remove(player.getUniqueId());
-        pendingPresentations.cancel(player.getUniqueId());
-        readyPresentations.remove(player.getUniqueId());
         gestures.cancel(player.getUniqueId());
         ActionTokens.Page page = new ActionTokens.Page();
         ClickEvent submit = page.bind(response -> {
@@ -213,8 +201,6 @@ public final class DialogMenuPlugin extends JavaPlugin implements Listener, TabE
     }
     public void suspendApplication(Player player) {
         presentationRequests.remove(player.getUniqueId());
-        pendingPresentations.cancel(player.getUniqueId());
-        readyPresentations.remove(player.getUniqueId());
         gestures.cancel(player.getUniqueId());
         tokens.remove(player.getUniqueId());
         DialogCompat.close(player);
@@ -260,8 +246,6 @@ public final class DialogMenuPlugin extends JavaPlugin implements Listener, TabE
     @Override public void onDisable() {
         if (activeReload != null) finishReloadDisplay(activeReload);
         reloadProgressLogger.shutdownNow();
-        pendingPresentations.clear();
-        presentationWorker.shutdownNow();
         previewWorker.shutdownNow();
         Bukkit.getServicesManager().unregisterAll(this);
         if (editor != null) editor.close();
@@ -274,9 +258,7 @@ public final class DialogMenuPlugin extends JavaPlugin implements Listener, TabE
         }
         views.clear();
         presentationRequests.clear();
-        presentationTicks.clear();
-        readyPresentations.clear();
-        immediateCaches.clear();
+        presentationCaches.clear();
         gestures.clear();
         tokens.clear();
         if (application != null) application.clear(Reason.DISABLED);
@@ -597,8 +579,6 @@ public final class DialogMenuPlugin extends JavaPlugin implements Listener, TabE
     public void replaceApplication(Player player) {
         UUID id = player.getUniqueId();
         presentationRequests.remove(id);
-        pendingPresentations.cancel(id);
-        readyPresentations.remove(id);
         View previous = views.remove(id);
         gestures.cancel(id);
         tokens.remove(id);
@@ -627,37 +607,13 @@ public final class DialogMenuPlugin extends JavaPlugin implements Listener, TabE
     }
 
     private long nextPresentationRequest(UUID id) {
-        long request = presentationSequence.incrementAndGet();
+        long request = ++presentationSequence;
         presentationRequests.put(id, request);
-        readyPresentations.remove(id);
         return request;
     }
 
     private boolean currentPresentationRequest(UUID id, long request) {
         return Objects.equals(presentationRequests.get(id), request);
-    }
-
-    private void publishPresentationLater(UUID id, long request, Runnable action) {
-        if (!isEnabled() || !currentPresentationRequest(id, request)) return;
-        readyPresentations.put(id, action);
-        try {
-            if (!isEnabled()) { readyPresentations.remove(id, action); return; }
-            Bukkit.getScheduler().runTask(this, () -> publishReady(id, action));
-        }
-        catch (org.bukkit.plugin.IllegalPluginAccessException error) {
-            readyPresentations.remove(id, action);
-            if (isEnabled()) throw error;
-        }
-    }
-
-    private void publishReady(UUID id, Runnable action) {
-        if (readyPresentations.remove(id, action)) action.run();
-    }
-
-    @EventHandler public void tickEnd(ServerTickEndEvent event) {
-        // Only take work already ready; never wait for rendering or drain new arrivals indefinitely.
-        for (var entry : List.copyOf(readyPresentations.entrySet()))
-            publishReady(entry.getKey(), entry.getValue());
     }
 
     private PresentationCache presentationCache(ReloadEngine.Snapshot snapshot,
@@ -703,26 +659,8 @@ public final class DialogMenuPlugin extends JavaPlugin implements Listener, TabE
         }
         View renderView = new View(view.document, view.width, List.copyOf(view.history), view.token,
             view.calibrationScale, Map.copyOf(view.inputs));
-        int tick = Bukkit.getCurrentTick();
-        Integer previousTick = presentationTicks.put(id, tick);
-        if (previousTick == null || tick - previousTick >= 2) {
-            pendingPresentations.cancel(id);
-            publishPresentation(player, request,
-                preparePresentation(player, snapshot, view, renderView, frozen, immediateCaches));
-            return;
-        }
-        pendingPresentations.submit(id, () -> {
-            try {
-                if (!currentPresentationRequest(id, request)) return;
-                var prepared = preparePresentation(player, snapshot, view, renderView, frozen, presentationCaches);
-                publishPresentationLater(id, request, () -> {
-                    try { publishPresentation(player, request, prepared); }
-                    catch (Exception error) { failPresentation(player, request, view, error); }
-                });
-            } catch (Exception error) {
-                publishPresentationLater(id, request, () -> failPresentation(player, request, view, error));
-            }
-        });
+        publishPresentation(player, request,
+            preparePresentation(player, snapshot, view, renderView, frozen, presentationCaches));
     }
 
     private PreparedPresentation preparePresentation(Player player, ReloadEngine.Snapshot snapshot,
@@ -848,12 +786,6 @@ public final class DialogMenuPlugin extends JavaPlugin implements Listener, TabE
         tokens.publish(id, prepared.page());
     }
 
-    private void failPresentation(Player player, long request, View view, Exception error) {
-        UUID id = player.getUniqueId();
-        if (!currentPresentationRequest(id, request) || views.get(id) != view) return;
-        failure(player, error);
-        close(player);
-    }
     private void submitNative(Player player, View view, NativeControls.Button button, DialogResponseView response) {
         UUID id = player.getUniqueId();
         View active = views.get(id);
@@ -986,8 +918,6 @@ public final class DialogMenuPlugin extends JavaPlugin implements Listener, TabE
     private void close(Player player, Reason reason) {
         UUID id = player.getUniqueId();
         presentationRequests.remove(id);
-        pendingPresentations.cancel(id);
-        readyPresentations.remove(id);
         View view = views.remove(id);
         gestures.cancel(id);
         tokens.remove(id);
@@ -1013,7 +943,6 @@ public final class DialogMenuPlugin extends JavaPlugin implements Listener, TabE
         if (activeReload != null && activeReload.bossBar != null)
             activeReload.bossBar.removePlayer(event.getPlayer());
         close(event.getPlayer(), Reason.PLAYER_QUIT);
-        presentationTicks.remove(event.getPlayer().getUniqueId());
     }
     @EventHandler public void ownerDisabled(PluginDisableEvent event) {
         if (event.getPlugin() != this) application.ownerDisabled(event.getPlugin());
