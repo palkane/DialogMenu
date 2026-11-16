@@ -35,7 +35,8 @@ public class ResourceBenchmark {
             if (!first.resourcesChanged() || Files.size(first.snapshot().pack()) == 0) throw new AssertionError("No resource build");
         }
         @TearDown(Level.Trial) public void teardown() throws Exception {
-            engine.close(); BenchmarkFixtures.remove(root);
+            if (engine != null) engine.close();
+            BenchmarkFixtures.remove(root);
         }
     }
     @Benchmark @BenchmarkMode(Mode.SingleShotTime)
