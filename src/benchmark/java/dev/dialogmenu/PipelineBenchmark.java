@@ -23,7 +23,7 @@ public class PipelineBenchmark {
         encoded = fixture.encode(frame, fixture.context, new ActionTokens.Page());
         if (BenchmarkFixtures.JSON.serialize(encoded).length() < 100) throw new AssertionError("Empty fixture");
     }
-    @TearDown(Level.Trial) public void teardown() throws Exception { fixture.close(); }
+    @TearDown(Level.Trial) public void teardown() throws Exception { if (fixture != null) fixture.close(); }
     @Benchmark public Object parseLayout() throws Exception { return LayoutStore.loadText("pipeline", fixture.yaml); }
     @Benchmark public Object renderWarm() throws Exception { return fixture.render(fixture.context); }
     @Benchmark public Object encodeWarm() { return fixture.encode(frame, fixture.context, new ActionTokens.Page()); }

@@ -34,7 +34,7 @@ public class SessionBenchmark {
         if (host.output == null || host.output.length() < 100 || host.visibleRows != rows)
             throw new AssertionError("List was not encoded");
     }
-    @TearDown(Level.Trial) public void teardown() throws Exception { host.close(); }
+    @TearDown(Level.Trial) public void teardown() throws Exception { if (host != null) host.close(); }
     private int next() { return Math.floorMod(sequence++, activePlayers); }
     @Benchmark public String bindAndPopulate() throws Exception {
         int i = next(); bindings[i] = host.bind(players[i], first); return host.output;

@@ -19,15 +19,32 @@ final class BenchmarkFixtures {
     static final int WIDTH = 480, MAX_PIXELS = 655360;
     static final String CHARACTERS = "0123456789Value物品金币";
     static final GsonComponentSerializer JSON = GsonComponentSerializer.gson();
+    private static boolean assetsVerified;
     static final Plugin OWNER = (Plugin) Proxy.newProxyInstance(BenchmarkFixtures.class.getClassLoader(),
         new Class<?>[]{Plugin.class}, (proxy, method, args) -> method.getName().equals("isEnabled") ? true : null);
 
     static Path directory() throws IOException {
-        // 缺少离线素材立即失败，禁止 benchmark 静默测量网络下载。
-        for (String name : List.of("glyphs.bin.gz", "vanilla-icons.zip", "vanilla-inventory.zip"))
-            if (BenchmarkFixtures.class.getResource("/" + name) == null)
-                throw new IOException("Missing offline benchmark resource: " + name);
+        verifyAssets();
         return Files.createTempDirectory("dialogmenu-benchmark-");
+    }
+    private static synchronized void verifyAssets() throws IOException {
+        if (assetsVerified) return;
+        var manifest = new Properties();
+        try (var input = BenchmarkFixtures.class.getResourceAsStream("/vanilla-assets.properties")) {
+            if (input == null) throw new IOException("Missing offline benchmark manifest");
+            manifest.load(input);
+        }
+        // 上游可更换资源库版本；素材不匹配须立即失败，不能落入下载分支。
+        for (String name : List.of("glyphs.bin.gz", "vanilla-icons.zip", "vanilla-inventory.zip")) {
+            try (var input = BenchmarkFixtures.class.getResourceAsStream("/" + name)) {
+                if (input == null) throw new IOException("Missing offline benchmark resource: " + name);
+                byte[] bytes = input.readAllBytes();
+                if (bytes.length != Long.parseLong(manifest.getProperty(name + ".size"))
+                        || !SourceFiles.digest(bytes).equals(manifest.getProperty(name + ".sha256")))
+                    throw new IOException("Offline benchmark resource does not match manifest: " + name);
+            }
+        }
+        assetsVerified = true;
     }
     static void remove(Path root) throws IOException {
         if (root == null || !Files.exists(root)) return;
