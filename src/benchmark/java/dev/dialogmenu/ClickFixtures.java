@@ -35,10 +35,10 @@ final class ClickFixtures implements MenuSessions.Host, AutoCloseable {
     BenchmarkRendering presentation;
     SpriteCanvas canvas = new SpriteCanvas();
 
-    ClickFixtures(int items) throws Exception {
+    ClickFixtures(int items, int variables) throws Exception {
         root = BenchmarkFixtures.directory();
         BenchmarkFixtures.image(root);
-        documents = LayoutStore.loadText("clicks", layout(items));
+        documents = LayoutStore.loadText("clicks", layout(items, variables));
         renderer = new MenuRenderer(new VanillaAssets(root.resolve("images")));
         fonts = FontPack.create(documents.values(), renderer, BenchmarkFixtures.context("0"),
             List.of(BenchmarkFixtures.WIDTH), BenchmarkFixtures.MAX_PIXELS,
@@ -51,15 +51,21 @@ final class ClickFixtures implements MenuSessions.Host, AutoCloseable {
             entry.name() + " 1", "", Map.of())).toList();
     }
 
-    private static String layout(int items) {
+    private static String layout(int items, int variables) {
         var yaml = new StringBuilder("""
             schema-version: 1
             id: clicks
             state: {flag: 'false', selected: '0'}
             collections:
               items: {external: true}
-            pages:
             """);
+        if (variables > 0) {
+            yaml.append("variables:\n");
+            for (int i = 0; i < variables; i++)
+                yaml.append("  label").append(i).append(": {type: literal, source: 'Value ")
+                    .append(i).append(" {flag}'}\n");
+        }
+        yaml.append("pages:\n");
         for (String page : List.of("dashboard", "detail")) {
             String other = page.equals("dashboard") ? "detail" : "dashboard";
             String body = BenchmarkFixtures.layout(page, items);
@@ -67,6 +73,8 @@ final class ClickFixtures implements MenuSessions.Host, AutoCloseable {
                 .replace("height: 300", "height: 340")
                 .replace("['tell: item0']", "['open: " + other + "']")
                 .replace("{value}", "{flag}");
+            if (variables > 0) for (int i = 0; i < items; i++)
+                body = body.replace("物品 " + i + " {flag}", "物品 " + i + " {label" + i % variables + "}");
             yaml.append("  ").append(page).append(":\n");
             body.lines().forEach(line -> yaml.append("    ").append(line).append('\n'));
             yaml.append("""

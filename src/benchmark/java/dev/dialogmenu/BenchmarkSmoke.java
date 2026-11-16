@@ -29,8 +29,10 @@ public final class BenchmarkSmoke {
                 cases += 5;
             } finally { benchmark.teardown(); }
         }
-        for (int players : new int[]{1, 50}) for (int items : new int[]{12, 48}) {
+        for (int players : new int[]{1, 50}) for (int items : new int[]{12, 48})
+                for (int variables : new int[]{0, 32}) {
             var benchmark = new ClickBenchmark(); benchmark.activePlayers = players; benchmark.items = items;
+            benchmark.variables = variables;
             try {
                 benchmark.setup();
                 checkClicks(benchmark);
@@ -55,6 +57,10 @@ public final class BenchmarkSmoke {
         for (int fields : new int[]{2, 12}) {
             var benchmark = new NativeControlsBenchmark(); benchmark.fields = fields;
             benchmark.setup(); benchmark.parse(); benchmark.validateSubmission(); cases += 2;
+        }
+        for (int variables : new int[]{12, 64}) {
+            var benchmark = new ExpansionBenchmark(); benchmark.variables = variables;
+            benchmark.setup(); benchmark.verify(); cases += 3;
         }
         System.out.println("PASS benchmark fixture cases=" + cases + " (offline; no timing assertions)");
     }
@@ -87,6 +93,8 @@ public final class BenchmarkSmoke {
             if (!host.sessions.expand(client.player, "{flag}").equals("true")
                     || client.presentations != before + 1)
                 throw new AssertionError("State click must change state and render once");
+            if (benchmark.variables > 0 && !host.sessions.expand(client.player, "{label0}").equals("Value 0 true"))
+                throw new AssertionError("Declared variable did not observe the new frame state");
 
             String oldRow = host.firstEntry(client);
             before = client.presentations;
@@ -124,6 +132,7 @@ public final class BenchmarkSmoke {
         int presentations = java.util.Arrays.stream(benchmark.clients).mapToInt(c -> c.presentations).sum();
         if (presentations != 6 * benchmark.activePlayers) throw new AssertionError("Unexpected presentation count");
         System.out.println("Fixture clicks items=" + benchmark.items + " activePlayers=" + benchmark.activePlayers
+            + " variables=" + benchmark.variables
             + " json-utf8-bytes=" + benchmark.clients[0].json.getBytes(java.nio.charset.StandardCharsets.UTF_8).length);
     }
 }

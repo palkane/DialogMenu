@@ -13,12 +13,13 @@ import org.openjdk.jmh.annotations.*;
 public class ClickBenchmark {
     @Param({"12", "48"}) public int items;
     @Param({"1", "50"}) public int activePlayers;
+    @Param({"0", "32"}) public int variables;
     ClickFixtures host;
     ClickFixtures.Client[] clients;
     int sequence;
 
     @Setup(Level.Trial) public void setup() throws Exception {
-        host = new ClickFixtures(items);
+        host = new ClickFixtures(items, variables);
         clients = new ClickFixtures.Client[activePlayers];
         for (int i = 0; i < activePlayers; i++) {
             var client = host.bind(BenchmarkFixtures.player(i));
